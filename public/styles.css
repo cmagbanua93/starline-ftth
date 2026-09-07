@@ -324,6 +324,8 @@ h1, h2, h3, h4, .brand strong, .stat b, .plan-speed { font-family: var(--font-he
 .port.reserved { background: #3a3116; border-color: #6d5b1f; color: #ffdc8a; }
 .port.faulty { background: #3a1a20; border-color: #7a2f3b; color: #ff9aa6; }
 .port.selected { outline: 2px solid var(--accent); outline-offset: 1px; }
+.port.dimmed { opacity: .35; }
+.port.dimmed:hover { opacity: .55; }
 .port .tag {
   position: absolute; bottom: 2px; right: 3px; font-size: 7.5px; opacity: .8; font-weight: 500;
 }

@@ -78,10 +78,12 @@ devices ──< ports ──< links (from_port_id ⇄ to_port_id, one link per p
                  └──< subscribers (one subscriber per port)
 ```
 
-Ports have a `port_kind` of `in` or `out`. A link must have at least one `out`
-end — two feeder-ins cannot face each other — but is otherwise unconstrained, so
-an OLT PON can feed a NAP's input, a NAP output can daisy-chain to the next
-NAP's input, and a closure can be fed from two directions with two inputs.
+Ports have a `port_kind` of `in` or `out`. This is a labelling convenience, not a
+constraint: any port can link to any port on another device. An OLT PON feeds a
+NAP's input, a NAP output daisy-chains to the next NAP's input, and a closure can
+be fed from two directions with two inputs. Joining two feeder-ins is unusual
+enough that the UI asks first, but it is allowed — a splice closure joins cores in
+whatever direction the plant actually runs.
 
 Feed direction is not stored — anything reachable from an OLT through live links
 is downstream of it. That is what makes impact analysis honest: it recomputes

@@ -600,14 +600,18 @@ function portCellHtml(p, labeling) {
     : `Port ${p.port_no}${cm ? ' · ' + cm.name : ''} — ${what}`;
 
   const colored = showColor && labeling === 'color';
+  // While choosing a link target, anything already occupied is greyed back.
+  const busy = state.mode?.kind === 'connect' && (link || sub) ? 'dimmed' : '';
   return `<div class="port ${portClass(p)} ${p.port_kind === 'in' ? 'feeder' : ''}
-              ${colored ? 'colored' : ''} ${selected ? 'selected' : ''}"
+              ${colored ? 'colored' : ''} ${selected ? 'selected' : ''} ${busy}"
             data-port="${p.id}" style="${style}" title="${esc(title)}">
             ${stripe}${esc(face)}<span class="tag">${tag}</span>
           </div>`;
 }
 
-function portGridHtml(device, { pickTarget = false } = {}) {
+function portGridHtml(device, opts = {}) {
+  // Any device opened while a link is being drawn is a candidate target.
+  const pickTarget = opts.pickTarget || state.mode?.kind === 'connect';
   const ports = state.portsOf.get(device.id) || [];
   if (!ports.length) return '<div class="empty">No ports configured. Set a port count below.</div>';
   const labeling = device.port_labeling || 'number';
@@ -635,9 +639,13 @@ function portGridHtml(device, { pickTarget = false } = {}) {
        ${ringKey}`
     : '';
 
-  return `
-    ${pickTarget ? '<p class="hint">Pick the destination port for the fiber link.</p>' : ''}
-    ${inBlock}${outBlock}`;
+  const targetHint = pickTarget
+    ? `<p class="hint">Pick the port this cable lands on. For a NAP, splitter or
+       closure that is normally its <strong>feeder in</strong> — the numbered
+       output ports are what it feeds onward.</p>`
+    : '';
+
+  return `${targetHint}${inBlock}${outBlock}`;
 }
 
 function openDevice(deviceId, opts = {}) {
@@ -993,12 +1001,21 @@ async function completeConnect(toPortId) {
   if (fp.device_id === tp.device_id) return toast('Both ports are on the same device', 'error');
   if (state.linkByPort.has(toPortId)) return toast('That port already has a fiber link', 'error');
   if (state.subByPort.has(toPortId)) return toast('That port is taken by a subscriber', 'error');
-  if (fp.port_kind === 'in' && tp.port_kind === 'in') {
-    return toast('Both ends are feeder-ins — one end has to be an output port', 'error');
-  }
-
   const da = state.byDevice.get(fp.device_id);
   const db = state.byDevice.get(tp.device_id);
+
+  // Unusual, but not forbidden — a closure can be spliced either way round.
+  if (fp.port_kind === 'in' && tp.port_kind === 'in') {
+    const ok = confirm(
+      `Both ends are feeder-in ports.\n\n` +
+      `Usually the upstream cable lands on a feeder-in and leaves again from an ` +
+      `output port — so ${da.name} would feed ${db.name} from one of its numbered ` +
+      `output ports, not from its own feeder-in.\n\n` +
+      `Connect them anyway?`
+    );
+    if (!ok) return;
+  }
+
   const guess = metersBetween([da.lat, da.lng], [db.lat, db.lng]);
 
   openModal({

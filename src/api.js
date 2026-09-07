@@ -285,9 +285,9 @@ router.post('/links', async (req, res, next) => {
     if (ports.rowCount !== 2) return bad(res, 'one or both ports not found');
     const [pa, pb] = ports.rows;
     if (pa.device_id === pb.device_id) return bad(res, 'both ports are on the same device');
-    if (pa.port_kind === 'in' && pb.port_kind === 'in') {
-      return bad(res, 'both ports are feeder inputs — one end has to be an output port');
-    }
+    // Feeder-in vs output is a labelling convenience, not a physical law — a
+    // splice closure joins cores in whatever direction the plant runs. The UI
+    // warns about an unusual pairing; the API does not refuse it.
 
     const busy = await query(
       `SELECT from_port_id, to_port_id FROM links
