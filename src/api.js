@@ -318,6 +318,63 @@ router.post('/links', async (req, res, next) => {
   }
 });
 
+/**
+ * Re-point one end of an existing link onto a different port, keeping the
+ * link's route, length and notes. Frees the port it was on.
+ */
+router.post('/links/:id/move', async (req, res, next) => {
+  try {
+    const { end, port_id: newPortId } = req.body || {};
+    if (!['from', 'to'].includes(end)) return bad(res, "end must be 'from' or 'to'");
+    if (!clean(newPortId)) return bad(res, 'port_id required');
+
+    const cur = await query('SELECT * FROM links WHERE id = $1', [req.params.id]);
+    if (!cur.rowCount) return res.status(404).json({ error: 'link not found' });
+    const link = cur.rows[0];
+
+    const oldPortId = end === 'from' ? link.from_port_id : link.to_port_id;
+    const otherPortId = end === 'from' ? link.to_port_id : link.from_port_id;
+    if (newPortId === oldPortId) return res.json(link);
+    if (newPortId === otherPortId) return bad(res, 'both ends would be the same port');
+
+    const ports = await query('SELECT * FROM ports WHERE id = ANY($1::uuid[])', [
+      [newPortId, otherPortId],
+    ]);
+    if (ports.rowCount !== 2) return bad(res, 'port not found');
+    const np = ports.rows.find((p) => p.id === newPortId);
+    const op = ports.rows.find((p) => p.id === otherPortId);
+    if (np.device_id === op.device_id) return bad(res, 'both ends would be on the same device');
+
+    const busy = await query(
+      'SELECT 1 FROM links WHERE (from_port_id = $1 OR to_port_id = $1) AND id <> $2',
+      [newPortId, req.params.id]
+    );
+    if (busy.rowCount) return bad(res, 'that port already has a fiber link');
+    const sub = await query('SELECT 1 FROM subscribers WHERE port_id = $1', [newPortId]);
+    if (sub.rowCount) return bad(res, 'that port is taken by a subscriber');
+
+    const updated = await withTx(async (client) => {
+      const col = end === 'from' ? 'from_port_id' : 'to_port_id';
+      const r = await client.query(
+        `UPDATE links SET ${col} = $1 WHERE id = $2 RETURNING *`,
+        [newPortId, req.params.id]
+      );
+      await client.query(
+        `UPDATE ports SET status = 'used' WHERE id = $1 AND status <> 'faulty'`,
+        [newPortId]
+      );
+      const stillUsed = await client.query('SELECT 1 FROM subscribers WHERE port_id = $1', [oldPortId]);
+      if (!stillUsed.rowCount) {
+        await client.query(`UPDATE ports SET status = 'free' WHERE id = $1 AND status = 'used'`, [oldPortId]);
+      }
+      return r.rows[0];
+    });
+    res.json(updated);
+  } catch (e) {
+    next(e);
+  }
+});
+
 router.patch('/links/:id', async (req, res, next) => {
   try {
     const b = req.body || {};

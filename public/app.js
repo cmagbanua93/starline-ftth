@@ -542,7 +542,7 @@ function closeDrawer() {
 }
 
 function onDeviceClick(deviceId) {
-  if (state.mode && state.mode.kind === 'connect') {
+  if (state.mode && (state.mode.kind === 'connect' || state.mode.kind === 'move')) {
     openDevice(deviceId, { pickTarget: true });
     return;
   }
@@ -601,7 +601,9 @@ function portCellHtml(p, labeling) {
 
   const colored = showColor && labeling === 'color';
   // While choosing a link target, anything already occupied is greyed back.
-  const busy = state.mode?.kind === 'connect' && (link || sub) ? 'dimmed' : '';
+  const picking = state.mode?.kind === 'connect' || state.mode?.kind === 'move';
+  const heldByMove = state.mode?.kind === 'move' && link?.id === state.mode.linkId;
+  const busy = picking && (link || sub) && !heldByMove ? 'dimmed' : '';
   return `<div class="port ${portClass(p)} ${p.port_kind === 'in' ? 'feeder' : ''}
               ${colored ? 'colored' : ''} ${selected ? 'selected' : ''} ${busy}"
             data-port="${p.id}" style="${style}" title="${esc(title)}">
@@ -611,7 +613,8 @@ function portCellHtml(p, labeling) {
 
 function portGridHtml(device, opts = {}) {
   // Any device opened while a link is being drawn is a candidate target.
-  const pickTarget = opts.pickTarget || state.mode?.kind === 'connect';
+  const picking = state.mode?.kind === 'connect' || state.mode?.kind === 'move';
+  const pickTarget = opts.pickTarget || picking;
   const ports = state.portsOf.get(device.id) || [];
   if (!ports.length) return '<div class="empty">No ports configured. Set a port count below.</div>';
   const labeling = device.port_labeling || 'number';
@@ -639,11 +642,13 @@ function portGridHtml(device, opts = {}) {
        ${ringKey}`
     : '';
 
-  const targetHint = pickTarget
-    ? `<p class="hint">Pick the port this cable lands on. For a NAP, splitter or
-       closure that is normally its <strong>feeder in</strong> — the numbered
-       output ports are what it feeds onward.</p>`
-    : '';
+  const targetHint = !pickTarget ? ''
+    : state.mode?.kind === 'move'
+      ? `<p class="hint">Click the port this cable end should move to. Ports already
+         carrying something are greyed out.</p>`
+      : `<p class="hint">Pick the port this cable lands on. For a NAP, splitter or
+         closure that is normally its <strong>feeder in</strong> — the numbered
+         output ports are what it feeds onward.</p>`;
 
   return `${targetHint}${inBlock}${outBlock}`;
 }
@@ -689,6 +694,7 @@ function openDevice(deviceId, opts = {}) {
     el.addEventListener('click', () => {
       const portId = el.dataset.port;
       if (state.mode && state.mode.kind === 'connect') return completeConnect(portId);
+      if (state.mode && state.mode.kind === 'move') return completeMove(portId);
       openPort(portId);
     });
   });
@@ -748,9 +754,14 @@ function openPort(portId) {
     <div class="section-title"><span>Connected to</span></div>
     ${connected}
 
+    ${link ? `<p class="hint">This port is taken by the cable above, so it can't start a
+      second one. Move that cable to another port to free this one — its route and
+      details come with it.</p>` : ''}
+
     <div class="btn-row">
       ${!link && !sub ? '<button class="btn primary" data-act="connect">Connect fiber →</button>' : ''}
       ${!link && !sub ? '<button class="btn" data-act="add-sub">Assign subscriber</button>' : ''}
+      ${link ? '<button class="btn primary" data-act="move-here">Move this cable end</button>' : ''}
       <button class="btn" data-act="edit-port">Edit port</button>
       ${link ? '<button class="btn danger" data-act="del-link">Remove fiber link</button>' : ''}
       <button class="btn ghost" data-act="back">← Back to device</button>
@@ -766,6 +777,9 @@ function openPort(portId) {
   body.querySelector('[data-act="edit-port"]').onclick = () => openEditPortModal(p);
   body.querySelector('[data-act="connect"]')?.addEventListener('click', () => startConnect(p.id));
   body.querySelector('[data-act="add-sub"]')?.addEventListener('click', () => openSubscriberModal(null, p.id));
+  body.querySelector('[data-act="move-here"]')?.addEventListener('click', () =>
+    startMoveEnd(link.id, link.from_port_id === p.id ? 'from' : 'to')
+  );
   body.querySelector('[data-act="del-link"]')?.addEventListener('click', () => deleteLink(link.id));
   body.querySelector('[data-open-link]')?.addEventListener('click', (e) => openLink(e.currentTarget.dataset.openLink));
   body.querySelector('[data-open-sub]')?.addEventListener('click', (e) => openSubscriber(e.currentTarget.dataset.openSub));
@@ -805,6 +819,8 @@ function openLink(linkId, opts = {}) {
       <button class="btn primary" data-act="route">${waypoints.length ? 'Edit route' : 'Trace route'}</button>
       ${routeLen && Number(l.cable_length_m) !== routeLen
         ? `<button class="btn" data-act="use-route-len">Use ${routeLen} m as length</button>` : ''}
+      <button class="btn" data-act="move-from">Move ${esc(da?.name || 'A')} end</button>
+      <button class="btn" data-act="move-to">Move ${esc(db?.name || 'B')} end</button>
       <button class="btn" data-act="edit">Edit link</button>
       ${l.status === 'cut'
         ? '<button class="btn" data-act="repair">Mark repaired</button>'
@@ -823,6 +839,8 @@ function openLink(linkId, opts = {}) {
     await refresh();
     toast('Cable length set from the traced route', 'ok');
   });
+  body.querySelector('[data-act="move-from"]').onclick = () => startMoveEnd(l.id, 'from');
+  body.querySelector('[data-act="move-to"]').onclick = () => startMoveEnd(l.id, 'to');
   body.querySelector('[data-act="edit"]').onclick = () => openEditLinkModal(l);
   body.querySelector('[data-act="impact"]').onclick = () =>
     showImpact({ linkId: l.id }, `${da?.name || '?'} → ${db?.name || '?'}`);
@@ -983,6 +1001,34 @@ function setMode(mode, text) {
   );
 }
 
+function startMoveEnd(linkId, end) {
+  const link = state.net.links.find((l) => l.id === linkId);
+  if (!link) return;
+  const movingPort = state.byPort.get(end === 'from' ? link.from_port_id : link.to_port_id);
+  const stayingPort = state.byPort.get(end === 'from' ? link.to_port_id : link.from_port_id);
+  const movingDev = state.byDevice.get(movingPort.device_id);
+  const stayingDev = state.byDevice.get(stayingPort.device_id);
+  setMode(
+    { kind: 'move', linkId, end },
+    `Moving the ${movingDev.name} end (${portName(movingPort)}) — click the port it should be on. ` +
+    `The ${stayingDev.name} end stays put.`
+  );
+  toast('Pick the port this end should move to', 'ok');
+}
+
+async function completeMove(newPortId) {
+  const { linkId, end } = state.mode;
+  try {
+    await api(`/links/${linkId}/move`, { method: 'POST', body: { end, port_id: newPortId } });
+    setMode(null);
+    await refresh({ keepSelection: false });
+    openLink(linkId, { silent: true });
+    toast('Cable end moved — route and details kept', 'ok');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
 function startConnect(fromPortId) {
   const p = state.byPort.get(fromPortId);
   const d = state.byDevice.get(p.device_id);
@@ -1018,10 +1064,22 @@ async function completeConnect(toPortId) {
 
   const guess = metersBetween([da.lat, da.lng], [db.lat, db.lng]);
 
+  // Landing an arriving cable on an output port while the box's feeder-in sits
+  // empty is the classic mis-wire — say so before it is saved.
+  const freeFeeder = (state.portsOf.get(tp.device_id) || []).find(
+    (p) => p.port_kind === 'in' && !state.linkByPort.has(p.id) && !state.subByPort.has(p.id)
+  );
+  const feederNudge = tp.port_kind === 'out' && freeFeeder
+    ? `<p class="hint" style="color:var(--gold-light)">${esc(db.name)}'s feeder in is still free.
+       An arriving cable normally lands there, leaving its numbered ports for what it
+       feeds onward. Fine to continue if this really is a port-to-port splice.</p>`
+    : '';
+
   openModal({
     title: 'New fiber link',
     body: `
       <p class="hint">${esc(da.name)} ${esc(portName(fp))} → ${esc(db.name)} ${esc(portName(tp))}</p>
+      ${feederNudge}
       <div class="field-row">
         <div class="field"><label>Cable length (m)</label><input id="f-len" type="number" min="0" value="${guess}" /></div>
         <div class="field"><label>Fiber core</label><input id="f-core" placeholder="e.g. Blue 1" /></div>

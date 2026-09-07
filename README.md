@@ -26,6 +26,10 @@ goes dark when a segment breaks.
   port on another (OLT PON → NAP, NAP → NAP daisy chain, splitter fan-out).
   Each link stores cable length, fiber core, cable type and status, and is drawn
   on the map. Straight-line distance is pre-filled as a length estimate.
+- **Re-pointing a cable** — either end of a link can be moved onto a different
+  port without deleting it, keeping its traced route, length and notes. A port
+  that is already taken says so and offers the move, so a mis-landed feeder is a
+  two-click correction rather than a rebuild.
 - **Traced cable routes** — cable does not run in straight lines, so any link can
   be traced along the road. Click waypoints on the map, drag them to adjust,
   click one to remove it; the app reports the real run length and can copy it
