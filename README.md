@@ -1,6 +1,7 @@
-# FTTH Network Manager
+# StarLine FTTH Network
 
 A map-based manager for StarLine Internet's fiber plant in Minglanilla, Cebu.
+Styled to the StarLine brand — navy and gold, Montserrat/Open Sans/Lato.
 Pin OLTs, NAP boxes and splitters on a real map, configure each physical port,
 wire port-to-port fiber links, hang subscribers off NAP ports, and trace what
 goes dark when a segment breaks.
@@ -25,6 +26,11 @@ goes dark when a segment breaks.
   port on another (OLT PON → NAP, NAP → NAP daisy chain, splitter fan-out).
   Each link stores cable length, fiber core, cable type and status, and is drawn
   on the map. Straight-line distance is pre-filled as a length estimate.
+- **Traced cable routes** — cable does not run in straight lines, so any link can
+  be traced along the road. Click waypoints on the map, drag them to adjust,
+  click one to remove it; the app reports the real run length and can copy it
+  into the link's cable length. Waypoints live in `links.path` and the drawn line
+  follows them.
 - **Subscribers** — assign a household to a free NAP port with plan, PPPoE
   username, ONU serial, address, drop length and install date. The house pin and
   its drop cable are drawn on the map.

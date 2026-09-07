@@ -1,24 +1,38 @@
+/* StarLine brand palette — navy + gold, matching starline.ph */
 :root {
-  --bg: #0e1117;
-  --bg-2: #151a23;
-  --bg-3: #1c222d;
-  --line: #262e3b;
-  --line-soft: #1f2733;
-  --txt: #e6ebf2;
-  --txt-2: #97a3b6;
-  --txt-3: #667389;
-  --accent: #3ba9ff;
-  --accent-dim: #1b5f92;
-  --olt: #ff7a45;
-  --nap: #3ba9ff;
+  --navy-deep: #061a2e;
+  --navy: #0c2d48;
+  --navy-light: #123a5e;
+  --gold: #e8b636;
+  --gold-light: #ffd76a;
+
+  --bg: var(--navy-deep);
+  --bg-2: #0a2340;
+  --bg-3: #10304f;
+  --line: #1c4468;
+  --line-soft: #143452;
+  --txt: #f4f8fb;
+  --txt-2: #c7d6e5;
+  --txt-3: #8fa8c0;
+  --accent: var(--gold);
+  --accent-dim: #7a6120;
+  --accent-ink: #061a2e;
+
+  --olt: #e8b636;
+  --nap: #4aa3e0;
   --splitter: #a97bff;
   --joint: #7c8aa0;
   --sub: #3ddc97;
   --warn: #ffc44d;
   --danger: #ff5c6c;
   --ok: #3ddc97;
+
+  --font-heading: 'Montserrat', 'Segoe UI', Arial, sans-serif;
+  --font-body: 'Open Sans', 'Segoe UI', Arial, sans-serif;
+  --font-logo: 'Lato', 'Segoe UI', Arial, sans-serif;
+
   --radius: 10px;
-  --shadow: 0 10px 30px rgba(0, 0, 0, .45);
+  --shadow: 0 10px 30px rgba(2, 10, 20, .55);
 }
 
 * { box-sizing: border-box; }
@@ -29,9 +43,11 @@ html, body {
   height: 100%;
   background: var(--bg);
   color: var(--txt);
-  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font: 14px/1.5 var(--font-body);
   -webkit-font-smoothing: antialiased;
 }
+
+h1, h2, h3, h4, .brand strong, .stat b, .plan-speed { font-family: var(--font-heading); }
 
 #app { height: 100%; display: flex; flex-direction: column; }
 .muted { color: var(--txt-2); }
@@ -42,16 +58,29 @@ html, body {
 .login-screen {
   position: fixed; inset: 0; z-index: 9000;
   display: grid; place-items: center;
-  background: radial-gradient(1200px 600px at 50% -10%, #16324a 0%, var(--bg) 60%);
+  background: radial-gradient(ellipse at top, var(--navy-light) 0%, var(--navy) 45%, var(--navy-deep) 100%);
+  overflow: hidden;
 }
+#stars { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .login-card {
+  position: relative; z-index: 2;
   width: min(360px, 90vw);
-  background: var(--bg-2); border: 1px solid var(--line);
-  border-radius: 16px; padding: 28px; text-align: center; box-shadow: var(--shadow);
+  background: rgba(6, 26, 46, .78);
+  border: 1px solid rgba(232, 182, 54, .22);
+  backdrop-filter: blur(8px);
+  border-radius: 18px; padding: 32px 28px; text-align: center; box-shadow: var(--shadow);
 }
-.login-logo { font-size: 34px; }
-.login-card h1 { font-size: 19px; margin: 8px 0 2px; }
-.login-card p { margin: 0 0 18px; font-size: 13px; }
+.login-logo { color: var(--gold); }
+.login-logo svg { width: 40px; height: 40px; filter: drop-shadow(0 0 14px rgba(232,182,54,.4)); }
+.login-eyebrow {
+  font-family: var(--font-heading); font-size: 11px; font-weight: 700;
+  letter-spacing: 3px; text-transform: uppercase; color: var(--gold-light);
+  margin-top: 12px;
+}
+.login-card h1 {
+  font-size: 22px; margin: 6px 0 2px; font-weight: 800; letter-spacing: -.2px;
+}
+.login-card p { margin: 0 0 20px; font-size: 13px; }
 .login-card input {
   width: 100%; padding: 11px 12px; margin-bottom: 10px;
   background: var(--bg-3); border: 1px solid var(--line);
@@ -63,13 +92,22 @@ html, body {
 
 .topbar {
   display: flex; align-items: center; gap: 16px;
-  padding: 10px 16px; background: var(--bg-2);
-  border-bottom: 1px solid var(--line); z-index: 800;
+  padding: 10px 16px;
+  background: rgba(6, 26, 46, .95);
+  border-bottom: 1px solid rgba(232, 182, 54, .18); z-index: 800;
 }
 .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.brand-mark { font-size: 20px; }
-.brand strong { display: block; font-size: 14px; letter-spacing: .2px; }
-.brand-sub { display: block; font-size: 11px; color: var(--txt-3); }
+.brand-mark { color: var(--gold); display: flex; }
+.brand-mark svg { width: 22px; height: 22px; }
+.brand strong {
+  display: block; font-family: var(--font-logo); font-weight: 800;
+  font-size: 14.5px; letter-spacing: .2px; color: var(--txt);
+}
+.brand strong em { font-style: normal; color: var(--gold-light); }
+.brand-sub {
+  display: block; font-family: var(--font-heading); font-size: 10px;
+  letter-spacing: 1.4px; text-transform: uppercase; color: var(--txt-3);
+}
 
 .search-wrap { position: relative; flex: 1; max-width: 520px; margin: 0 auto; }
 .search-wrap input {
@@ -103,8 +141,9 @@ html, body {
 }
 .panel { margin-bottom: 20px; }
 .panel h2 {
-  font-size: 11px; text-transform: uppercase; letter-spacing: .09em;
-  color: var(--txt-3); margin: 0 0 8px;
+  font-family: var(--font-heading); font-size: 10.5px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .14em;
+  color: var(--gold); margin: 0 0 8px;
 }
 
 .place-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
@@ -134,8 +173,8 @@ html, body {
 .legend li { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--txt-2); padding: 3px 0; }
 .legend-lines { margin-top: 8px !important; }
 .line { width: 22px; height: 3px; border-radius: 2px; display: inline-block; }
-.line.active { background: #4fb0ff; }
-.line.planned { background: #667389; }
+.line.active { background: #5bb8f5; }
+.line.planned { background: #7c8aa0; }
 .line.cut { background: var(--danger); }
 
 .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
@@ -152,10 +191,12 @@ html, body {
 
 .mode-banner {
   position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
-  z-index: 700; background: #14314a; border: 1px solid var(--accent-dim);
-  color: var(--txt); padding: 8px 12px; border-radius: 999px;
+  z-index: 700; background: rgba(6, 26, 46, .96); border: 1px solid rgba(232,182,54,.45);
+  color: var(--txt); padding: 8px 14px; border-radius: 999px;
   display: flex; align-items: center; gap: 10px; font-size: 13px; box-shadow: var(--shadow);
+  max-width: min(92%, 720px);
 }
+.mode-banner .mode-count { color: var(--gold-light); font-weight: 700; }
 
 .dev-marker { display: grid; place-items: center; }
 .dev-pin {
@@ -173,6 +214,17 @@ html, body {
 .dev-pin.isolated { border-color: var(--danger); box-shadow: 0 0 0 3px rgba(255,92,108,.35); }
 .dev-pin.faulted { animation: pulse 1.1s infinite; }
 @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(255,92,108,.7); } 50% { box-shadow: 0 0 0 8px rgba(255,92,108,0); } }
+
+/* route-tracing waypoint handles */
+.route-handle-wrap { display: grid; place-items: center; }
+.route-handle {
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid var(--navy-deep); box-shadow: 0 1px 5px rgba(0,0,0,.6);
+  cursor: grab;
+}
+.route-handle.draft { background: var(--gold-light); }
+.route-handle.saved { background: #ffffff; width: 10px; height: 10px; opacity: .9; }
+.route-handle:hover { transform: scale(1.25); }
 
 .dev-label {
   position: absolute; top: 20px; left: 50%; transform: translateX(-50%);
@@ -204,7 +256,10 @@ html, body {
   padding: 14px 16px; border-bottom: 1px solid var(--line);
 }
 .drawer-head h2 { margin: 2px 0 0; font-size: 16px; }
-.kicker { font-size: 10.5px; text-transform: uppercase; letter-spacing: .09em; color: var(--txt-3); }
+.kicker {
+  font-family: var(--font-heading); font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .16em; color: var(--gold);
+}
 .drawer-body { padding: 14px 16px 40px; overflow-y: auto; flex: 1; }
 
 .icon-btn {
@@ -235,8 +290,12 @@ html, body {
   cursor: pointer; font-family: inherit;
 }
 .btn:hover { border-color: var(--accent-dim); }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #06121d; font-weight: 600; }
-.btn.primary:hover { filter: brightness(1.08); }
+.btn.primary {
+  background: linear-gradient(90deg, var(--gold), var(--gold-light));
+  border-color: var(--gold); color: var(--accent-ink);
+  font-family: var(--font-heading); font-weight: 700;
+}
+.btn.primary:hover { filter: brightness(1.06); box-shadow: 0 6px 18px rgba(232,182,54,.28); }
 .btn.danger { color: var(--danger); border-color: #4a2730; }
 .btn.danger:hover { background: #2a1720; }
 .btn.ghost { background: transparent; }
@@ -248,8 +307,9 @@ html, body {
 
 .section-title {
   display: flex; align-items: center; justify-content: space-between;
-  font-size: 11px; text-transform: uppercase; letter-spacing: .09em;
-  color: var(--txt-3); margin: 18px 0 8px;
+  font-family: var(--font-heading); font-size: 10.5px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .14em;
+  color: var(--gold); margin: 18px 0 8px;
 }
 .port-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 5px; }
 .port-grid.wide { grid-template-columns: repeat(4, 1fr); }

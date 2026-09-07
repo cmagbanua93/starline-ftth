@@ -3,18 +3,27 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-<title>FTTH Network Manager — StarLine</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🛰️</text></svg>" />
+<title>StarLine FTTH Network</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23061a2e'/><path d='M16 5l2.9 6.6L26 12.4l-5.3 4.7 1.5 7-6.2-3.6-6.2 3.6 1.5-7L6 12.4l7.1-.8z' fill='%23e8b636'/></svg>" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;500;600;700&family=Montserrat:wght@600;700;800&family=Lato:wght@700;800&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
 <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
 
 <div id="login" class="login-screen" hidden>
+  <canvas id="stars"></canvas>
   <form id="login-form" class="login-card">
-    <div class="login-logo">🛰️</div>
-    <h1>FTTH Network Manager</h1>
-    <p class="muted">Minglanilla, Cebu · StarLine Internet</p>
+    <div class="login-logo">
+      <svg viewBox="0 0 32 32" aria-hidden="true">
+        <path d="M16 3l3.4 7.7L28 11.6l-6.2 5.5 1.8 8.2L16 21.1 8.4 25.3l1.8-8.2L4 11.6l8.6-.9z" fill="currentColor"/>
+      </svg>
+    </div>
+    <div class="login-eyebrow">StarLine Internet</div>
+    <h1>FTTH Network</h1>
+    <p class="muted">Minglanilla, Cebu</p>
     <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" />
     <button type="submit" class="btn primary block">Sign in</button>
     <div id="login-error" class="login-error"></div>
@@ -24,9 +33,13 @@
 <div id="app" hidden>
   <header class="topbar">
     <div class="brand">
-      <span class="brand-mark">🛰️</span>
+      <span class="brand-mark">
+        <svg viewBox="0 0 32 32" aria-hidden="true">
+          <path d="M16 3l3.4 7.7L28 11.6l-6.2 5.5 1.8 8.2L16 21.1 8.4 25.3l1.8-8.2L4 11.6l8.6-.9z" fill="currentColor"/>
+        </svg>
+      </span>
       <div>
-        <strong>FTTH Network Manager</strong>
+        <strong>StarLine <em>FTTH Network</em></strong>
         <span class="brand-sub">Minglanilla, Cebu</span>
       </div>
     </div>
@@ -72,7 +85,7 @@
       <section class="panel legend">
         <h2>Legend</h2>
         <ul id="legend-list">
-          <li><span class="dot olt"></span> OLT</li>
+          <li><span class="dot olt"></span> OLT (head-end)</li>
           <li><span class="dot nap"></span> NAP box</li>
           <li><span class="dot splitter"></span> Splitter</li>
           <li><span class="dot joint"></span> Joint / closure</li>
@@ -90,6 +103,7 @@
       <div id="map"></div>
       <div id="mode-banner" class="mode-banner" hidden>
         <span id="mode-text"></span>
+        <span id="mode-actions"></span>
         <button class="btn tiny ghost" id="mode-cancel">Cancel</button>
       </div>
     </main>

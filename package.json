@@ -1,7 +1,7 @@
 {
-  "name": "ftth-network-manager",
+  "name": "starline-ftth-network",
   "version": "1.0.0",
-  "description": "FTTH Network Manager - map-based OLT/NAP/port/subscriber management for StarLine Internet",
+  "description": "StarLine FTTH Network - map-based OLT/NAP/port/subscriber management for StarLine Internet",
   "main": "src/server.js",
   "type": "commonjs",
   "scripts": {

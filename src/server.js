@@ -83,7 +83,7 @@ async function start() {
   if (!ready) console.error('[db] starting anyway; API calls will fail until the database is reachable');
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`FTTH Network Manager listening on ${PORT}`);
+    console.log(`StarLine FTTH Network listening on ${PORT}`);
     if (!APP_PASSWORD) console.log('[auth] APP_PASSWORD not set — the app is open to anyone with the URL');
   });
 }

@@ -29,8 +29,8 @@ const linkLines = new Map();   // linkId -> polyline
 const dropLines = new Map();   // subscriberId -> polyline
 
 const TYPE_META = {
-  OLT: { label: 'OLT', color: '#ff7a45', short: 'O', defaultPorts: 8, defaultIn: 0, hint: 'PON ports' },
-  NAP: { label: 'NAP box', color: '#3ba9ff', short: 'N', defaultPorts: 8, defaultIn: 1, hint: 'output ports' },
+  OLT: { label: 'OLT', color: '#e8b636', short: 'O', defaultPorts: 8, defaultIn: 0, hint: 'PON ports' },
+  NAP: { label: 'NAP box', color: '#4aa3e0', short: 'N', defaultPorts: 8, defaultIn: 1, hint: 'output ports' },
   SPLITTER: { label: 'Splitter', color: '#a97bff', short: 'S', defaultPorts: 8, defaultIn: 1, hint: 'output ports' },
   JOINT: { label: 'Joint / closure', color: '#7c8aa0', short: 'J', defaultPorts: 4, defaultIn: 1, hint: 'fiber cores' },
 };
@@ -85,6 +85,13 @@ async function api(path, options = {}) {
   return data;
 }
 
+/** Total length of a polyline, in metres. */
+function pathLength(points) {
+  let total = 0;
+  for (let i = 1; i < points.length; i++) total += metersBetween(points[i - 1], points[i]);
+  return Math.round(total);
+}
+
 function metersBetween(a, b) {
   const R = 6371000;
   const toRad = (d) => (d * Math.PI) / 180;
@@ -127,6 +134,9 @@ function initMap() {
   map.on('click', (e) => {
     if (state.mode && state.mode.kind === 'place') {
       openNewDeviceModal(state.mode.type, e.latlng);
+    } else if (state.mode && state.mode.kind === 'route') {
+      state.mode.points.push([e.latlng.lat, e.latlng.lng]);
+      drawRouteDraft();
     }
   });
 
@@ -244,7 +254,7 @@ function renderMap() {
     if (!pts) continue;
     const down = state.simulated?.lostLinkIds?.has(l.id);
     const style = {
-      color: l.status === 'cut' || down ? '#ff5c6c' : l.status === 'planned' ? '#667389' : '#4fb0ff',
+      color: l.status === 'cut' || down ? '#ff5c6c' : l.status === 'planned' ? '#7c8aa0' : '#5bb8f5',
       weight: state.selection?.kind === 'link' && state.selection.id === l.id ? 6 : 3.5,
       opacity: 0.95,
       dashArray: l.status === 'planned' ? '7,7' : l.status === 'cut' ? '3,6' : null,
@@ -298,6 +308,157 @@ function renderMap() {
   }
   for (const [id, m] of subMarkers) if (!seenSubs.has(id)) { map.removeLayer(m); subMarkers.delete(id); }
   for (const [id, l] of dropLines) if (!seenSubs.has(id)) { map.removeLayer(l); dropLines.delete(id); }
+}
+
+/* ---------------------------- route tracing ------------------------------ */
+/*
+ * A fiber link defaults to a straight line, which is never how cable actually
+ * runs. Route tracing lets you click the real path along the road; the clicked
+ * waypoints are stored on the link and the drawn line follows them.
+ */
+
+const route = { line: null, handles: [], endpoints: null };
+
+function linkEndpoints(link) {
+  const pa = state.byPort.get(link.from_port_id);
+  const pb = state.byPort.get(link.to_port_id);
+  const da = pa ? state.byDevice.get(pa.device_id) : null;
+  const db = pb ? state.byDevice.get(pb.device_id) : null;
+  if (!da || !db) return null;
+  return [[da.lat, da.lng], [db.lat, db.lng]];
+}
+
+function clearRouteDraft() {
+  if (route.line) { map.removeLayer(route.line); route.line = null; }
+  for (const h of route.handles) map.removeLayer(h);
+  route.handles = [];
+  route.endpoints = null;
+}
+
+function handleIcon(kind) {
+  return L.divIcon({
+    className: 'route-handle-wrap',
+    html: `<div class="route-handle ${kind}"></div>`,
+    iconSize: [14, 14],
+    iconAnchor: [7, 7],
+  });
+}
+
+/** Live preview while tracing: endpoints + the points clicked so far. */
+function drawRouteDraft() {
+  const m = state.mode;
+  if (!m || m.kind !== 'route') return;
+  const pts = [route.endpoints[0], ...m.points, route.endpoints[1]];
+
+  if (!route.line) {
+    route.line = L.polyline(pts, { color: '#ffd76a', weight: 4, opacity: .95, dashArray: '8,6' }).addTo(map);
+  } else {
+    route.line.setLatLngs(pts);
+  }
+
+  for (const h of route.handles) map.removeLayer(h);
+  route.handles = m.points.map((p, i) => {
+    const marker = L.marker(p, { icon: handleIcon('draft'), draggable: true, zIndexOffset: 900 });
+    marker.on('drag', (e) => {
+      const { lat, lng } = e.target.getLatLng();
+      m.points[i] = [lat, lng];
+      route.line.setLatLngs([route.endpoints[0], ...m.points, route.endpoints[1]]);
+    });
+    marker.on('click', (e) => {
+      L.DomEvent.stop(e);
+      m.points.splice(i, 1);
+      drawRouteDraft();
+    });
+    return marker.addTo(map);
+  });
+
+  updateModeActions();
+}
+
+function startRouteTrace(linkId) {
+  const link = state.net.links.find((l) => l.id === linkId);
+  if (!link) return;
+  const ends = linkEndpoints(link);
+  if (!ends) return toast('Cannot trace: an end of this link is missing', 'error');
+
+  clearRouteDraft();
+  route.endpoints = ends;
+  const existing = Array.isArray(link.path) ? link.path.map((p) => [p[0], p[1]]) : [];
+  setMode({ kind: 'route', linkId, points: existing }, 'Click along the road to trace the cable route');
+  drawRouteDraft();
+  map.fitBounds(L.latLngBounds([ends[0], ...existing, ends[1]]), { padding: [90, 90], maxZoom: 18 });
+  toast('Click the map to lay the route. Drag a point to move it, click it to remove it.', 'ok');
+}
+
+function updateModeActions() {
+  const slot = $('#mode-actions');
+  const m = state.mode;
+  if (!slot || !m || m.kind !== 'route') { if (slot) slot.innerHTML = ''; return; }
+
+  const pts = [route.endpoints[0], ...m.points, route.endpoints[1]];
+  slot.innerHTML = `
+    <span class="mode-count">${m.points.length} point${m.points.length === 1 ? '' : 's'} · ${pathLength(pts)} m</span>
+    <button class="btn tiny ghost" data-route="undo" ${m.points.length ? '' : 'disabled'}>Undo</button>
+    <button class="btn tiny ghost" data-route="clear" ${m.points.length ? '' : 'disabled'}>Straighten</button>
+    <button class="btn tiny primary" data-route="save">Save route</button>`;
+
+  slot.querySelector('[data-route="undo"]').onclick = () => { m.points.pop(); drawRouteDraft(); };
+  slot.querySelector('[data-route="clear"]').onclick = () => { m.points = []; drawRouteDraft(); };
+  slot.querySelector('[data-route="save"]').onclick = saveRoute;
+}
+
+async function saveRoute() {
+  const m = state.mode;
+  if (!m || m.kind !== 'route') return;
+  const pts = [route.endpoints[0], ...m.points, route.endpoints[1]];
+  const length = pathLength(pts);
+  try {
+    await api(`/links/${m.linkId}`, {
+      method: 'PATCH',
+      body: { path: m.points.length ? m.points : null },
+    });
+    const linkId = m.linkId;
+    setMode(null);
+    clearRouteDraft();
+    await refresh({ keepSelection: false });
+    openLink(linkId, { silent: true });
+    toast(
+      m.points.length ? `Route saved — ${length} m along the traced path` : 'Route cleared',
+      'ok'
+    );
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+/** Draggable waypoints shown while a link is selected, for quick corrections. */
+function showRouteHandles(link) {
+  clearRouteDraft();
+  const pts = Array.isArray(link.path) ? link.path : [];
+  if (!pts.length) return;
+  route.handles = pts.map((p, i) => {
+    const marker = L.marker([p[0], p[1]], {
+      icon: handleIcon('saved'), draggable: true, zIndexOffset: 900,
+      title: 'Drag to adjust · click to remove',
+    });
+    marker.on('dragend', async (e) => {
+      const { lat, lng } = e.target.getLatLng();
+      const next = pts.map((q, j) => (j === i ? [lat, lng] : q));
+      try {
+        await api(`/links/${link.id}`, { method: 'PATCH', body: { path: next } });
+        await refresh({ keepSelection: true });
+      } catch (err) { toast(err.message, 'error'); await refresh(); }
+    });
+    marker.on('click', async (e) => {
+      L.DomEvent.stop(e);
+      const next = pts.filter((_, j) => j !== i);
+      try {
+        await api(`/links/${link.id}`, { method: 'PATCH', body: { path: next.length ? next : null } });
+        await refresh({ keepSelection: true });
+      } catch (err) { toast(err.message, 'error'); }
+    });
+    return marker.addTo(map);
+  });
 }
 
 /* -------------------------------- data ---------------------------------- */
@@ -364,6 +525,7 @@ function renderStats() {
 /* -------------------------------- drawer -------------------------------- */
 
 function openDrawer(kicker, title, html) {
+  if (state.mode?.kind !== 'route') clearRouteDraft();
   $('#drawer-kicker').textContent = kicker;
   $('#drawer-title').textContent = title;
   $('#drawer-body').innerHTML = html;
@@ -374,6 +536,8 @@ function closeDrawer() {
   $('#drawer').hidden = true;
   state.selection = null;
   state.simulated = null;
+  if (state.mode?.kind === 'route') setMode(null);
+  clearRouteDraft();
   renderMap();
 }
 
@@ -608,6 +772,11 @@ function openLink(linkId, opts = {}) {
   const da = pa ? state.byDevice.get(pa.device_id) : null;
   const db = pb ? state.byDevice.get(pb.device_id) : null;
   const straight = da && db ? metersBetween([da.lat, da.lng], [db.lat, db.lng]) : null;
+  const waypoints = Array.isArray(l.path) ? l.path : [];
+  const ends = linkEndpoints(l);
+  const routeLen = waypoints.length && ends
+    ? pathLength([ends[0], ...waypoints, ends[1]])
+    : null;
 
   const html = `
     <ul class="info-list">
@@ -615,6 +784,9 @@ function openLink(linkId, opts = {}) {
       <li><span class="k">To</span><span class="v">${esc(db?.name || '?')} · ${esc(portName(pb))}</span></li>
       <li><span class="k">Status</span><span class="v">${statusPill(l.status)}</span></li>
       <li><span class="k">Cable length</span><span class="v">${l.cable_length_m ? esc(l.cable_length_m) + ' m' : '—'}</span></li>
+      ${routeLen
+        ? `<li><span class="k">Traced route</span><span class="v">${routeLen} m · ${waypoints.length} waypoint${waypoints.length === 1 ? '' : 's'}</span></li>`
+        : ''}
       ${straight ? `<li><span class="k">Straight line</span><span class="v">${straight} m</span></li>` : ''}
       <li><span class="k">Fiber core</span><span class="v">${l.fiber_core ? esc(l.fiber_core) : '—'}</span></li>
       <li><span class="k">Cable type</span><span class="v">${l.cable_type ? esc(l.cable_type) : '—'}</span></li>
@@ -622,6 +794,9 @@ function openLink(linkId, opts = {}) {
     </ul>
 
     <div class="btn-row">
+      <button class="btn primary" data-act="route">${waypoints.length ? 'Edit route' : 'Trace route'}</button>
+      ${routeLen && Number(l.cable_length_m) !== routeLen
+        ? `<button class="btn" data-act="use-route-len">Use ${routeLen} m as length</button>` : ''}
       <button class="btn" data-act="edit">Edit link</button>
       ${l.status === 'cut'
         ? '<button class="btn" data-act="repair">Mark repaired</button>'
@@ -634,6 +809,12 @@ function openLink(linkId, opts = {}) {
   openDrawer('Fiber link', `${da?.name || '?'} → ${db?.name || '?'}`, html);
 
   const body = $('#drawer-body');
+  body.querySelector('[data-act="route"]').onclick = () => startRouteTrace(l.id);
+  body.querySelector('[data-act="use-route-len"]')?.addEventListener('click', async () => {
+    await api(`/links/${l.id}`, { method: 'PATCH', body: { cable_length_m: routeLen } });
+    await refresh();
+    toast('Cable length set from the traced route', 'ok');
+  });
   body.querySelector('[data-act="edit"]').onclick = () => openEditLinkModal(l);
   body.querySelector('[data-act="impact"]').onclick = () =>
     showImpact({ linkId: l.id }, `${da?.name || '?'} → ${db?.name || '?'}`);
@@ -651,9 +832,12 @@ function openLink(linkId, opts = {}) {
   });
 
   if (!opts.silent && da && db) {
-    map.fitBounds(L.latLngBounds([[da.lat, da.lng], [db.lat, db.lng]]), { padding: [80, 80], maxZoom: 18 });
+    map.fitBounds(L.latLngBounds([[da.lat, da.lng], ...waypoints, [db.lat, db.lng]]), {
+      padding: [80, 80], maxZoom: 18,
+    });
   }
   renderMap();
+  if (state.mode?.kind !== 'route') showRouteHandles(l);
 }
 
 function openSubscriber(subId, opts = {}) {
@@ -772,6 +956,7 @@ async function showImpact(params, label) {
 /* -------------------------------- modes --------------------------------- */
 
 function setMode(mode, text) {
+  const leavingRoute = state.mode?.kind === 'route' && mode?.kind !== 'route';
   state.mode = mode;
   const banner = $('#mode-banner');
   if (mode) {
@@ -780,8 +965,11 @@ function setMode(mode, text) {
     map.getContainer().style.cursor = 'crosshair';
   } else {
     banner.hidden = true;
+    $('#mode-actions').innerHTML = '';
     map.getContainer().style.cursor = '';
   }
+  if (leavingRoute) clearRouteDraft();
+  if (mode?.kind !== 'route') $('#mode-actions').innerHTML = '';
   document.querySelectorAll('.place-btn').forEach((b) =>
     b.classList.toggle('active', mode?.kind === 'place' && b.dataset.place === mode.type)
   );
@@ -831,10 +1019,15 @@ async function completeConnect(toPortId) {
         </div>
       </div>
       <div class="field"><label>Notes</label><textarea id="f-notes" placeholder="Pole route, slack loop location…"></textarea></div>
+      <label class="row-check"><input type="checkbox" id="f-trace" checked />
+        Trace the route on the map next</label>
+      <p class="hint">The length above is the straight-line distance. Tracing the real
+        route along the road replaces it with the actual cable run.</p>
     `,
     confirm: 'Create link',
     onConfirm: async () => {
-      await api('/links', {
+      const trace = $('#f-trace').checked;
+      const link = await api('/links', {
         method: 'POST',
         body: {
           from_port_id: fromPortId,
@@ -849,8 +1042,13 @@ async function completeConnect(toPortId) {
       setMode(null);
       await refresh({ keepSelection: false });
       state.selection = null;
-      openDevice(db.id, { silent: true });
-      toast('Fiber link created', 'ok');
+      if (trace) {
+        openLink(link.id, { silent: true });
+        startRouteTrace(link.id);
+      } else {
+        openDevice(db.id, { silent: true });
+        toast('Fiber link created', 'ok');
+      }
     },
   });
 }
@@ -1206,6 +1404,49 @@ function runSearch(q) {
 function showLogin() {
   $('#login').hidden = false;
   $('#app').hidden = true;
+  startStarfield();
+}
+
+/** The drifting starfield from starline.ph, reused on the sign-in screen. */
+function startStarfield() {
+  const canvas = $('#stars');
+  if (!canvas || canvas.dataset.running) return;
+  canvas.dataset.running = '1';
+  const ctx = canvas.getContext('2d');
+  let stars = [];
+
+  const resize = () => {
+    canvas.width = canvas.offsetWidth;
+    canvas.height = canvas.offsetHeight;
+    const count = Math.floor((canvas.width * canvas.height) / 6000);
+    stars = Array.from({ length: count }, () => ({
+      x: Math.random() * canvas.width,
+      y: Math.random() * canvas.height,
+      r: Math.random() * 1.4 + 0.3,
+      baseAlpha: Math.random() * 0.6 + 0.2,
+      speed: Math.random() * 0.02 + 0.005,
+      phase: Math.random() * Math.PI * 2,
+    }));
+  };
+
+  let t = 0;
+  const draw = () => {
+    if ($('#login').hidden) { canvas.dataset.running = ''; return; }
+    t += 1;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (const s of stars) {
+      const alpha = s.baseAlpha + Math.sin(t * s.speed + s.phase) * 0.3;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255, 255, 255, ${Math.max(0, Math.min(1, alpha))})`;
+      ctx.fill();
+    }
+    requestAnimationFrame(draw);
+  };
+
+  window.addEventListener('resize', resize);
+  resize();
+  draw();
 }
 
 async function boot() {
