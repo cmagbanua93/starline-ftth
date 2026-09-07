@@ -29,11 +29,32 @@ const linkLines = new Map();   // linkId -> polyline
 const dropLines = new Map();   // subscriberId -> polyline
 
 const TYPE_META = {
-  OLT: { label: 'OLT', color: '#ff7a45', short: 'O', defaultPorts: 8, hint: 'PON ports' },
-  NAP: { label: 'NAP box', color: '#3ba9ff', short: 'N', defaultPorts: 8, hint: 'output ports' },
-  SPLITTER: { label: 'Splitter', color: '#a97bff', short: 'S', defaultPorts: 8, hint: 'output ports' },
-  JOINT: { label: 'Joint / closure', color: '#7c8aa0', short: 'J', defaultPorts: 4, hint: 'fiber cores' },
+  OLT: { label: 'OLT', color: '#ff7a45', short: 'O', defaultPorts: 8, defaultIn: 0, hint: 'PON ports' },
+  NAP: { label: 'NAP box', color: '#3ba9ff', short: 'N', defaultPorts: 8, defaultIn: 1, hint: 'output ports' },
+  SPLITTER: { label: 'Splitter', color: '#a97bff', short: 'S', defaultPorts: 8, defaultIn: 1, hint: 'output ports' },
+  JOINT: { label: 'Joint / closure', color: '#7c8aa0', short: 'J', defaultPorts: 4, defaultIn: 1, hint: 'fiber cores' },
 };
+
+/**
+ * TIA-598-C pigtail colours, in the order they appear in a NAP or splitter.
+ * `ink` is the text colour that stays readable on top of `hex`.
+ */
+const FIBER_COLORS = [
+  { name: 'Blue',   short: 'BL', hex: '#0057b8', ink: '#ffffff' },
+  { name: 'Orange', short: 'OR', hex: '#ff7a00', ink: '#241100' },
+  { name: 'Green',  short: 'GN', hex: '#00a651', ink: '#00190c' },
+  { name: 'Brown',  short: 'BN', hex: '#7b4b28', ink: '#ffffff' },
+  { name: 'Slate',  short: 'SL', hex: '#8c8c8c', ink: '#141414' },
+  { name: 'White',  short: 'WH', hex: '#f2f2f2', ink: '#141414' },
+  { name: 'Red',    short: 'RD', hex: '#e02020', ink: '#ffffff' },
+  { name: 'Black',  short: 'BK', hex: '#1a1a1a', ink: '#ffffff' },
+  { name: 'Yellow', short: 'YL', hex: '#ffd500', ink: '#211c00' },
+  { name: 'Violet', short: 'VI', hex: '#7b2fbe', ink: '#ffffff' },
+  { name: 'Rose',   short: 'RS', hex: '#ff8fb1', ink: '#2a0a15' },
+  { name: 'Aqua',   short: 'AQ', hex: '#35d0d0', ink: '#03211f' },
+];
+const colorMeta = (name) =>
+  FIBER_COLORS.find((c) => c.name.toLowerCase() === String(name || '').toLowerCase()) || null;
 
 /* ------------------------------- helpers -------------------------------- */
 
@@ -368,32 +389,91 @@ function statusPill(v) {
   return `<span class="pill ${esc(v)}">${esc(v)}</span>`;
 }
 
+/** Human name for a port: "Feeder in", "port 3", or "port 3 (Green)". */
+function portName(p) {
+  if (!p) return 'port ?';
+  if (p.port_kind === 'in') {
+    const dev = state.byDevice.get(p.device_id);
+    return dev && dev.input_count > 1 ? `feeder in ${p.port_no}` : 'feeder in';
+  }
+  const dev = state.byDevice.get(p.device_id);
+  const cm = colorMeta(p.fiber_color);
+  return cm && dev?.port_labeling && dev.port_labeling !== 'number'
+    ? `port ${p.port_no} (${cm.name})`
+    : `port ${p.port_no}`;
+}
+
 function portClass(p) {
   if (state.subByPort.has(p.id)) return 'sub';
   if (p.status === 'used') return 'used';
   return p.status;
 }
 
+function portCellHtml(p, labeling) {
+  const link = state.linkByPort.get(p.id);
+  const sub = state.subByPort.get(p.id);
+  const tag = sub ? '👤' : link ? '⇄' : '';
+  const selected = state.selection?.kind === 'port' && state.selection.id === p.id;
+  const cm = colorMeta(p.fiber_color);
+  const showColor = p.port_kind === 'out' && cm && labeling !== 'number';
+
+  // In pure colour mode the pigtail colour is the port's identity, so it fills
+  // the cell; status still shows through the border and the corner tag.
+  const style = showColor && labeling === 'color'
+    ? `background:${cm.hex};color:${cm.ink}`
+    : '';
+  const face = p.port_kind === 'in'
+    ? 'IN'
+    : labeling === 'color' ? cm?.short ?? p.port_no
+    : labeling === 'both' ? `${p.port_no}` : `${p.port_no}`;
+
+  const stripe = showColor && labeling === 'both'
+    ? `<span class="stripe" style="background:${cm.hex}"></span>` : '';
+
+  const what = sub ? sub.name : link ? 'fiber link' : p.label || 'free';
+  const title = p.port_kind === 'in'
+    ? `Feeder in ${p.port_no} — ${what}`
+    : `Port ${p.port_no}${cm ? ' · ' + cm.name : ''} — ${what}`;
+
+  const colored = showColor && labeling === 'color';
+  return `<div class="port ${portClass(p)} ${p.port_kind === 'in' ? 'feeder' : ''}
+              ${colored ? 'colored' : ''} ${selected ? 'selected' : ''}"
+            data-port="${p.id}" style="${style}" title="${esc(title)}">
+            ${stripe}${esc(face)}<span class="tag">${tag}</span>
+          </div>`;
+}
+
 function portGridHtml(device, { pickTarget = false } = {}) {
   const ports = state.portsOf.get(device.id) || [];
   if (!ports.length) return '<div class="empty">No ports configured. Set a port count below.</div>';
-  const wide = ports.length <= 8 && ports.some((p) => p.label && p.label.length > 3);
-  const cells = ports.map((p) => {
-    const link = state.linkByPort.get(p.id);
-    const sub = state.subByPort.get(p.id);
-    let tag = '';
-    if (sub) tag = '👤';
-    else if (link) tag = '⇄';
-    const selected = state.selection?.kind === 'port' && state.selection.id === p.id;
-    const title = sub ? sub.name : link ? 'fiber link' : p.label || 'free';
-    return `<div class="port ${portClass(p)} ${selected ? 'selected' : ''}"
-              data-port="${p.id}" title="Port ${p.port_no} — ${esc(title)}">
-              ${p.port_no}<span class="tag">${tag}</span>
-            </div>`;
-  }).join('');
+  const labeling = device.port_labeling || 'number';
+  const ins = ports.filter((p) => p.port_kind === 'in');
+  const outs = ports.filter((p) => p.port_kind !== 'in');
+  const meta = TYPE_META[device.type] || TYPE_META.JOINT;
+
+  const inBlock = ins.length
+    ? `<div class="port-sub">Feeder in — the cable arriving from upstream</div>
+       <div class="port-grid feeder-grid">${ins.map((p) => portCellHtml(p, labeling)).join('')}</div>`
+    : '';
+
+  const ringKey = labeling === 'color'
+    ? `<div class="ring-key">
+         <span><i class="ring free"></i>free</span>
+         <span><i class="ring used"></i>fiber link</span>
+         <span><i class="ring sub"></i>subscriber</span>
+         <span><i class="ring faulty"></i>faulty</span>
+       </div>`
+    : '';
+
+  const outBlock = outs.length
+    ? `<div class="port-sub">${esc(meta.hint)}${labeling !== 'number' ? ' — pigtail colour' : ''}</div>
+       <div class="port-grid">${outs.map((p) => portCellHtml(p, labeling)).join('')}</div>
+       ${ringKey}`
+    : '';
+
   return `
     ${pickTarget ? '<p class="hint">Pick the destination port for the fiber link.</p>' : ''}
-    <div class="port-grid ${wide ? 'wide' : ''}">${cells}</div>`;
+    ${inBlock}${outBlock}`;
 }
 
 function openDevice(deviceId, opts = {}) {
@@ -412,14 +492,15 @@ function openDevice(deviceId, opts = {}) {
       ${d.splitter_ratio ? `<li><span class="k">Split ratio</span><span class="v">${esc(d.splitter_ratio)}</span></li>` : ''}
       ${d.area ? `<li><span class="k">Area</span><span class="v">${esc(d.area)}</span></li>` : ''}
       ${d.address ? `<li><span class="k">Address</span><span class="v">${esc(d.address)}</span></li>` : ''}
-      <li><span class="k">Ports</span><span class="v">${cap.used} used · ${cap.free} free · ${cap.total} total</span></li>
+      <li><span class="k">Output ports</span><span class="v">${cap.used} used · ${cap.free} free · ${cap.total} total</span></li>
+      ${d.input_count ? `<li><span class="k">Feeder in</span><span class="v">${d.input_count} port${d.input_count > 1 ? 's' : ''}</span></li>` : ''}
       <li><span class="k">Subscribers</span><span class="v">${cap.subscribers}</span></li>
       <li><span class="k">Coordinates</span><span class="v">${d.lat.toFixed(6)}, ${d.lng.toFixed(6)}</span></li>
       ${d.notes ? `<li><span class="k">Notes</span><span class="v">${esc(d.notes)}</span></li>` : ''}
       ${isolated ? `<li><span class="k">Feed</span><span class="v" style="color:var(--danger)">No path to an OLT</span></li>` : ''}
     </ul>
 
-    <div class="section-title"><span>Ports (${meta.hint})</span></div>
+    <div class="section-title"><span>Ports</span></div>
     ${portGridHtml(d, opts)}
 
     <div class="btn-row">
@@ -464,7 +545,7 @@ function openPort(portId) {
     const od = op ? state.byDevice.get(op.device_id) : null;
     connected = `
       <div class="mini-card clickable" data-open-link="${link.id}">
-        <div class="title">⇄ ${esc(od?.name || 'unknown')} · port ${op?.port_no ?? '?'}</div>
+        <div class="title">⇄ ${esc(od?.name || 'unknown')} · ${esc(portName(op))}</div>
         <div class="meta">
           ${statusPill(link.status)}
           ${link.cable_length_m ? ' · ' + esc(link.cable_length_m) + ' m' : ''}
@@ -480,9 +561,13 @@ function openPort(portId) {
       </div>`;
   }
 
+  const cm = colorMeta(p.fiber_color);
   const html = `
     <ul class="info-list">
       <li><span class="k">Device</span><span class="v">${esc(dev?.name || '')}</span></li>
+      <li><span class="k">Role</span><span class="v">${p.port_kind === 'in' ? 'Feeder in (from upstream)' : 'Output / drop'}</span></li>
+      ${cm ? `<li><span class="k">Pigtail colour</span><span class="v">
+        <span class="swatch" style="background:${cm.hex}"></span>${esc(cm.name)}</span></li>` : ''}
       <li><span class="k">Port status</span><span class="v">${statusPill(p.status)}</span></li>
       ${p.label ? `<li><span class="k">Label</span><span class="v">${esc(p.label)}</span></li>` : ''}
       ${p.notes ? `<li><span class="k">Notes</span><span class="v">${esc(p.notes)}</span></li>` : ''}
@@ -499,7 +584,10 @@ function openPort(portId) {
       <button class="btn ghost" data-act="back">← Back to device</button>
     </div>
   `;
-  openDrawer(`${dev?.name || 'Device'} · Port ${p.port_no}`, `Port ${p.port_no}`, html);
+  const heading = p.port_kind === 'in'
+    ? (dev?.input_count > 1 ? `Feeder in ${p.port_no}` : 'Feeder in')
+    : `Port ${p.port_no}${cm && dev?.port_labeling !== 'number' ? ' · ' + cm.name : ''}`;
+  openDrawer(`${dev?.name || 'Device'} · ${heading}`, heading, html);
 
   const body = $('#drawer-body');
   body.querySelector('[data-act="back"]').onclick = () => openDevice(p.device_id, { silent: true });
@@ -523,8 +611,8 @@ function openLink(linkId, opts = {}) {
 
   const html = `
     <ul class="info-list">
-      <li><span class="k">From</span><span class="v">${esc(da?.name || '?')} · port ${pa?.port_no ?? '?'}</span></li>
-      <li><span class="k">To</span><span class="v">${esc(db?.name || '?')} · port ${pb?.port_no ?? '?'}</span></li>
+      <li><span class="k">From</span><span class="v">${esc(da?.name || '?')} · ${esc(portName(pa))}</span></li>
+      <li><span class="k">To</span><span class="v">${esc(db?.name || '?')} · ${esc(portName(pb))}</span></li>
       <li><span class="k">Status</span><span class="v">${statusPill(l.status)}</span></li>
       <li><span class="k">Cable length</span><span class="v">${l.cable_length_m ? esc(l.cable_length_m) + ' m' : '—'}</span></li>
       ${straight ? `<li><span class="k">Straight line</span><span class="v">${straight} m</span></li>` : ''}
@@ -583,7 +671,7 @@ function openSubscriber(subId, opts = {}) {
       ${s.onu_serial ? `<li><span class="k">ONU serial</span><span class="v">${esc(s.onu_serial)}</span></li>` : ''}
       ${s.phone ? `<li><span class="k">Phone</span><span class="v">${esc(s.phone)}</span></li>` : ''}
       ${s.address ? `<li><span class="k">Address</span><span class="v">${esc(s.address)}</span></li>` : ''}
-      <li><span class="k">Fed from</span><span class="v">${dev ? esc(dev.name) + ' · port ' + port.port_no : 'not assigned'}</span></li>
+      <li><span class="k">Fed from</span><span class="v">${dev ? esc(dev.name) + ' · ' + esc(portName(port)) : 'not assigned'}</span></li>
       ${s.drop_length_m ? `<li><span class="k">Drop cable</span><span class="v">${esc(s.drop_length_m)} m</span></li>` : ''}
       ${s.installed_on ? `<li><span class="k">Installed</span><span class="v">${esc(String(s.installed_on).slice(0, 10))}</span></li>` : ''}
       ${s.notes ? `<li><span class="k">Notes</span><span class="v">${esc(s.notes)}</span></li>` : ''}
@@ -631,7 +719,7 @@ async function traceDevice(deviceId) {
     `<li><strong>${esc(start?.name || '')}</strong><div class="meta">start</div></li>`,
     ...res.hops.map(
       (h) => `<li><strong>${esc(h.device?.name || '')}</strong>
-        <div class="meta">via port ${h.viaPort?.port_no ?? '?'} → port ${h.peerPort?.port_no ?? '?'}</div></li>`
+        <div class="meta">via ${esc(portName(h.viaPort))} → ${esc(portName(h.peerPort))}</div></li>`
     ),
   ];
   extra.innerHTML = `<div class="section-title"><span>Path to OLT (${res.hops.length} hop${res.hops.length === 1 ? '' : 's'})</span></div>
@@ -704,7 +792,7 @@ function startConnect(fromPortId) {
   const d = state.byDevice.get(p.device_id);
   setMode(
     { kind: 'connect', fromPortId },
-    `Connecting from ${d.name} port ${p.port_no} — click the destination device, then its port`
+    `Connecting from ${d.name} ${portName(p)} — click the destination device, then its port`
   );
   toast('Now click the device you want to feed', 'ok');
 }
@@ -717,6 +805,9 @@ async function completeConnect(toPortId) {
   if (fp.device_id === tp.device_id) return toast('Both ports are on the same device', 'error');
   if (state.linkByPort.has(toPortId)) return toast('That port already has a fiber link', 'error');
   if (state.subByPort.has(toPortId)) return toast('That port is taken by a subscriber', 'error');
+  if (fp.port_kind === 'in' && tp.port_kind === 'in') {
+    return toast('Both ends are feeder-ins — one end has to be an output port', 'error');
+  }
 
   const da = state.byDevice.get(fp.device_id);
   const db = state.byDevice.get(tp.device_id);
@@ -725,7 +816,7 @@ async function completeConnect(toPortId) {
   openModal({
     title: 'New fiber link',
     body: `
-      <p class="hint">${esc(da.name)} port ${fp.port_no} → ${esc(db.name)} port ${tp.port_no}</p>
+      <p class="hint">${esc(da.name)} ${esc(portName(fp))} → ${esc(db.name)} ${esc(portName(tp))}</p>
       <div class="field-row">
         <div class="field"><label>Cable length (m)</label><input id="f-len" type="number" min="0" value="${guess}" /></div>
         <div class="field"><label>Fiber core</label><input id="f-core" placeholder="e.g. Blue 1" /></div>
@@ -768,7 +859,7 @@ async function completeConnect(toPortId) {
 
 let modalConfirm = null;
 
-function openModal({ title, body, confirm: confirmLabel = 'Save', onConfirm }) {
+function openModal({ title, body, confirm: confirmLabel = 'Save', onConfirm, afterOpen }) {
   $('#modal-title').textContent = title;
   $('#modal-body').innerHTML = body;
   $('#modal-foot').innerHTML = `
@@ -783,6 +874,7 @@ function openModal({ title, body, confirm: confirmLabel = 'Save', onConfirm }) {
       closeModal();
     } catch (e) { toast(e.message, 'error'); }
   };
+  afterOpen?.();
   setTimeout(() => $('#modal-body input, #modal-body select, #modal-body textarea')?.focus(), 30);
 }
 
@@ -809,10 +901,22 @@ function deviceFormHtml(d, type) {
         </select></div>
     </div>
     <div class="field-row">
-      <div class="field"><label>Port count (${esc(meta.hint)})</label>
+      <div class="field"><label>Output ports (${esc(meta.hint)})</label>
         <input id="d-ports" type="number" min="0" max="256" value="${d?.port_count ?? meta.defaultPorts}" /></div>
+      <div class="field"><label>Feeder-in ports</label>
+        <input id="d-inputs" type="number" min="0" max="8" value="${d?.input_count ?? meta.defaultIn}" /></div>
+    </div>
+    <p class="hint">A 1:8 NAP is 1 feeder in + 8 out. Use 2 feeder-ins for a loop-through
+      closure fed from both directions.</p>
+    <div class="field-row">
       <div class="field"><label>Split ratio</label>
         <input id="d-ratio" value="${esc(d?.splitter_ratio || '')}" placeholder="1:8, 1:16…" /></div>
+      <div class="field"><label>Label ports by</label>
+        <select id="d-labeling">
+          <option value="number" ${(d?.port_labeling || 'number') === 'number' ? 'selected' : ''}>Port number</option>
+          <option value="color"  ${d?.port_labeling === 'color' ? 'selected' : ''}>Pigtail colour</option>
+          <option value="both"   ${d?.port_labeling === 'both' ? 'selected' : ''}>Number + colour</option>
+        </select></div>
     </div>
     <div class="field-row">
       <div class="field"><label>Model</label><input id="d-model" value="${esc(d?.model || '')}" placeholder="e.g. Huawei MA5608T" /></div>
@@ -830,6 +934,8 @@ function readDeviceForm() {
     type: $('#d-type').value,
     status: $('#d-status').value,
     port_count: $('#d-ports').value,
+    input_count: $('#d-inputs').value,
+    port_labeling: $('#d-labeling').value,
     splitter_ratio: $('#d-ratio').value,
     model: $('#d-model').value,
     area: $('#d-area').value,
@@ -844,6 +950,15 @@ function openNewDeviceModal(type, latlng) {
     body: `<p class="hint">Dropping at ${latlng.lat.toFixed(6)}, ${latlng.lng.toFixed(6)} — you can drag the pin later.</p>
            ${deviceFormHtml(null, type)}`,
     confirm: 'Place device',
+    afterOpen: () => {
+      // Switching type in the form should move the port defaults with it.
+      $('#d-type').addEventListener('change', (e) => {
+        const m = TYPE_META[e.target.value];
+        if (!m) return;
+        $('#d-ports').value = m.defaultPorts;
+        $('#d-inputs').value = m.defaultIn;
+      });
+    },
     onConfirm: async () => {
       const body = { ...readDeviceForm(), lat: latlng.lat, lng: latlng.lng };
       if (!body.name.trim()) throw new Error('Give the device a name');
@@ -871,20 +986,39 @@ function openEditDeviceModal(d) {
 }
 
 function openEditPortModal(p) {
+  const colorOptions = ['<option value="">— none —</option>']
+    .concat(
+      FIBER_COLORS.map(
+        (c) => `<option value="${c.name}" ${
+          (p.fiber_color || '').toLowerCase() === c.name.toLowerCase() ? 'selected' : ''
+        }>${c.name}</option>`
+      )
+    )
+    .join('');
+
   openModal({
-    title: `Port ${p.port_no}`,
+    title: p.port_kind === 'in' ? `Feeder in ${p.port_no}` : `Port ${p.port_no}`,
     body: `
       <div class="field"><label>Label</label>
         <input id="p-label" value="${esc(p.label || '')}" placeholder="e.g. feeds NAP-03 / Purok 2" /></div>
-      <div class="field"><label>Status</label>
-        <select id="p-status">
-          ${['free', 'used', 'reserved', 'faulty'].map((s) => `<option ${p.status === s ? 'selected' : ''}>${s}</option>`).join('')}
-        </select></div>
+      <div class="field-row">
+        <div class="field"><label>Pigtail colour</label>
+          <select id="p-color">${colorOptions}</select></div>
+        <div class="field"><label>Status</label>
+          <select id="p-status">
+            ${['free', 'used', 'reserved', 'faulty'].map((s) => `<option ${p.status === s ? 'selected' : ''}>${s}</option>`).join('')}
+          </select></div>
+      </div>
       <div class="field"><label>Notes</label><textarea id="p-notes">${esc(p.notes || '')}</textarea></div>`,
     onConfirm: async () => {
       await api(`/ports/${p.id}`, {
         method: 'PATCH',
-        body: { label: $('#p-label').value, status: $('#p-status').value, notes: $('#p-notes').value },
+        body: {
+          label: $('#p-label').value,
+          status: $('#p-status').value,
+          notes: $('#p-notes').value,
+          fiber_color: $('#p-color').value,
+        },
       });
       await refresh({ keepSelection: false });
       openPort(p.id);
@@ -932,7 +1066,7 @@ function openSubscriberModal(sub, portId) {
   openModal({
     title: sub ? `Edit ${sub.name}` : 'New subscriber',
     body: `
-      ${dev ? `<p class="hint">On ${esc(dev.name)} port ${port.port_no}</p>` : ''}
+      ${dev ? `<p class="hint">On ${esc(dev.name)} ${esc(portName(port))}</p>` : ''}
       <div class="field"><label>Name</label><input id="s-name" value="${esc(sub?.name || '')}" placeholder="Household / account name" /></div>
       <div class="field-row">
         <div class="field"><label>Plan</label><input id="s-plan" value="${esc(sub?.plan || '')}" placeholder="e.g. 25 Mbps" /></div>

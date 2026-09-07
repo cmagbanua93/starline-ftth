@@ -1,10 +1,12 @@
 const express = require('express');
-const { query, withTx } = require('./db');
+const { query, withTx, FIBER_COLORS } = require('./db');
 const graph = require('./graph');
 
 const router = express.Router();
 
 const DEVICE_TYPES = ['OLT', 'NAP', 'SPLITTER', 'JOINT'];
+const LABELING = ['number', 'color', 'both'];
+const colorFor = (portNo) => FIBER_COLORS[(portNo - 1) % FIBER_COLORS.length];
 const DEVICE_STATUS = ['active', 'planned', 'fault', 'offline'];
 const PORT_STATUS = ['free', 'used', 'reserved', 'faulty'];
 const LINK_STATUS = ['active', 'planned', 'cut'];
@@ -34,7 +36,7 @@ function clean(v) {
 async function loadNetwork() {
   const [devices, ports, links, subscribers] = await Promise.all([
     query('SELECT * FROM devices ORDER BY type, name').then((r) => r.rows),
-    query('SELECT * FROM ports ORDER BY device_id, port_no').then((r) => r.rows),
+    query('SELECT * FROM ports ORDER BY device_id, port_kind, port_no').then((r) => r.rows),
     query('SELECT * FROM links ORDER BY created_at').then((r) => r.rows),
     query('SELECT * FROM subscribers ORDER BY name').then((r) => r.rows),
   ]);
@@ -56,30 +58,49 @@ router.get('/network', async (req, res, next) => {
 /* devices                                                             */
 /* ------------------------------------------------------------------ */
 
-async function syncPorts(client, deviceId, portCount) {
+/**
+ * Bring a device's ports in line with its configured counts.
+ *
+ * Devices have two kinds of port: `in` — the feeder coming from upstream — and
+ * `out` — the distribution/drop ports. A 1:8 NAP is one `in` and eight `out`.
+ * An OLT is all outputs (its PON ports) and has no feeder-in.
+ *
+ * Output ports are given their TIA-598-C pigtail colour by position, because
+ * that is how they are identified in the field.
+ */
+async function syncPorts(client, deviceId, outCount, inCount) {
   const existing = await client.query(
-    'SELECT id, port_no, status FROM ports WHERE device_id = $1 ORDER BY port_no',
+    'SELECT id, port_no, port_kind, status FROM ports WHERE device_id = $1 ORDER BY port_kind, port_no',
     [deviceId]
   );
-  const have = new Set(existing.rows.map((r) => r.port_no));
-  const wanted = [];
-  for (let i = 1; i <= portCount; i++) wanted.push(i);
 
-  for (const n of wanted) {
-    if (!have.has(n)) {
-      await client.query('INSERT INTO ports (device_id, port_no) VALUES ($1, $2)', [deviceId, n]);
+  const wanted = { in: inCount, out: outCount };
+  for (const kind of ['in', 'out']) {
+    const have = new Set(existing.rows.filter((r) => r.port_kind === kind).map((r) => r.port_no));
+    for (let n = 1; n <= wanted[kind]; n++) {
+      if (have.has(n)) continue;
+      await client.query(
+        `INSERT INTO ports (device_id, port_no, port_kind, fiber_color, label)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          deviceId, n, kind,
+          kind === 'out' ? colorFor(n) : null,
+          kind === 'in' ? (wanted.in > 1 ? `Feeder in ${n}` : 'Feeder in') : null,
+        ]
+      );
     }
-  }
-  // Trim extra ports, but never destroy a port that is in use or linked.
-  const extras = existing.rows.filter((r) => r.port_no > portCount);
-  for (const p of extras) {
-    const linked = await client.query(
-      'SELECT 1 FROM links WHERE from_port_id = $1 OR to_port_id = $1 LIMIT 1',
-      [p.id]
-    );
-    const sub = await client.query('SELECT 1 FROM subscribers WHERE port_id = $1 LIMIT 1', [p.id]);
-    if (linked.rowCount === 0 && sub.rowCount === 0) {
-      await client.query('DELETE FROM ports WHERE id = $1', [p.id]);
+
+    // Trim extras, but never destroy a port carrying a link or a subscriber.
+    const extras = existing.rows.filter((r) => r.port_kind === kind && r.port_no > wanted[kind]);
+    for (const p of extras) {
+      const linked = await client.query(
+        'SELECT 1 FROM links WHERE from_port_id = $1 OR to_port_id = $1 LIMIT 1',
+        [p.id]
+      );
+      const sub = await client.query('SELECT 1 FROM subscribers WHERE port_id = $1 LIMIT 1', [p.id]);
+      if (linked.rowCount === 0 && sub.rowCount === 0) {
+        await client.query('DELETE FROM ports WHERE id = $1', [p.id]);
+      }
     }
   }
 }
@@ -93,23 +114,33 @@ router.post('/devices', async (req, res, next) => {
     if (lat === null || lng === null) return bad(res, 'lat/lng required');
     const name = clean(b.name);
     if (!name) return bad(res, 'name required');
-    let portCount = Math.max(0, Math.min(256, parseInt(b.port_count, 10) || 8));
+    const portCount = Math.max(0, Math.min(256, parseInt(b.port_count, 10) || 8));
+    const defaultIn = b.type === 'OLT' ? 0 : 1;
+    const inputCount = Math.max(
+      0,
+      Math.min(8, b.input_count === undefined ? defaultIn : parseInt(b.input_count, 10) || 0)
+    );
     const status = DEVICE_STATUS.includes(b.status) ? b.status : 'active';
+    const labeling = LABELING.includes(b.port_labeling) ? b.port_labeling : 'number';
 
     const device = await withTx(async (client) => {
       const r = await client.query(
-        `INSERT INTO devices (type, name, lat, lng, model, status, port_count, splitter_ratio, area, address, notes)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+        `INSERT INTO devices (type, name, lat, lng, model, status, port_count, input_count,
+                              port_labeling, splitter_ratio, area, address, notes)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
         [
-          b.type, name, lat, lng, clean(b.model), status, portCount,
+          b.type, name, lat, lng, clean(b.model), status, portCount, inputCount, labeling,
           clean(b.splitter_ratio), clean(b.area), clean(b.address), clean(b.notes),
         ]
       );
-      await syncPorts(client, r.rows[0].id, portCount);
+      await syncPorts(client, r.rows[0].id, portCount, inputCount);
       return r.rows[0];
     });
 
-    const ports = await query('SELECT * FROM ports WHERE device_id = $1 ORDER BY port_no', [device.id]);
+    const ports = await query(
+      'SELECT * FROM ports WHERE device_id = $1 ORDER BY port_kind, port_no',
+      [device.id]
+    );
     res.status(201).json({ device, ports: ports.rows });
   } catch (e) {
     next(e);
@@ -146,10 +177,20 @@ router.patch('/devices/:id', async (req, res, next) => {
       if (b[col] !== undefined) set(col, clean(b[col]));
     }
 
+    if (b.port_labeling !== undefined) {
+      if (!LABELING.includes(b.port_labeling)) return bad(res, 'invalid port labeling');
+      set('port_labeling', b.port_labeling);
+    }
+
     let portCount;
     if (b.port_count !== undefined) {
       portCount = Math.max(0, Math.min(256, parseInt(b.port_count, 10) || 0));
       set('port_count', portCount);
+    }
+    let inputCount;
+    if (b.input_count !== undefined) {
+      inputCount = Math.max(0, Math.min(8, parseInt(b.input_count, 10) || 0));
+      set('input_count', inputCount);
     }
     if (!fields.length) return bad(res, 'nothing to update');
     set('updated_at', new Date());
@@ -161,12 +202,22 @@ router.patch('/devices/:id', async (req, res, next) => {
         values
       );
       if (!r.rowCount) return null;
-      if (portCount !== undefined) await syncPorts(client, req.params.id, portCount);
+      if (portCount !== undefined || inputCount !== undefined) {
+        await syncPorts(
+          client,
+          req.params.id,
+          portCount !== undefined ? portCount : r.rows[0].port_count,
+          inputCount !== undefined ? inputCount : r.rows[0].input_count
+        );
+      }
       return r.rows[0];
     });
     if (!result) return res.status(404).json({ error: 'device not found' });
 
-    const ports = await query('SELECT * FROM ports WHERE device_id = $1 ORDER BY port_no', [req.params.id]);
+    const ports = await query(
+      'SELECT * FROM ports WHERE device_id = $1 ORDER BY port_kind, port_no',
+      [req.params.id]
+    );
     res.json({ device: result, ports: ports.rows });
   } catch (e) {
     next(e);
@@ -203,6 +254,7 @@ router.patch('/ports/:id', async (req, res, next) => {
     }
     if (b.label !== undefined) set('label', clean(b.label));
     if (b.notes !== undefined) set('notes', clean(b.notes));
+    if (b.fiber_color !== undefined) set('fiber_color', clean(b.fiber_color));
     if (!fields.length) return bad(res, 'nothing to update');
     values.push(req.params.id);
 
@@ -233,6 +285,9 @@ router.post('/links', async (req, res, next) => {
     if (ports.rowCount !== 2) return bad(res, 'one or both ports not found');
     const [pa, pb] = ports.rows;
     if (pa.device_id === pb.device_id) return bad(res, 'both ports are on the same device');
+    if (pa.port_kind === 'in' && pb.port_kind === 'in') {
+      return bad(res, 'both ports are feeder inputs — one end has to be an output port');
+    }
 
     const busy = await query(
       `SELECT from_port_id, to_port_id FROM links
@@ -339,6 +394,10 @@ router.post('/subscribers', async (req, res, next) => {
         [portId]
       );
       if (linked.rowCount) return bad(res, 'that port is used by a fiber link');
+      const kind = await query('SELECT port_kind FROM ports WHERE id = $1', [portId]);
+      if (kind.rows[0]?.port_kind === 'in') {
+        return bad(res, 'a subscriber cannot sit on a feeder-in port');
+      }
     }
 
     const sub = await withTx(async (client) => {

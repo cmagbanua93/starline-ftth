@@ -142,6 +142,8 @@ function capacityByDevice(devices, ports, links, subscribers) {
   for (const p of ports) {
     const c = byDevice.get(p.device_id);
     if (!c) continue;
+    // Feeder-in ports are not sellable capacity, so they stay out of the counts.
+    if (p.port_kind === 'in') continue;
     c.total += 1;
     if (p.status === 'used') c.used += 1;
     else if (p.status === 'reserved') c.reserved += 1;

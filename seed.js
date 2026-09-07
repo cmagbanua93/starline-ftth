@@ -35,8 +35,9 @@ async function main() {
     const d = await call('/devices', 'POST', {
       type: 'NAP', name: `NAP-${a.name.split(' ')[0]}-0${i + 1}`,
       lat: a.lat + 0.0011 + (i * 0.0007), lng: a.lng + 0.0013 + (i * 0.0009),
-      port_count: 8, area: a.name, model: 'FTTH 1x8 NAP',
+      port_count: 8, input_count: 1, area: a.name, model: 'FTTH 1x8 NAP',
       address: `Pole ${100 + i}`, splitter_ratio: '1:8',
+      port_labeling: i % 2 === 0 ? 'color' : 'number',
     });
     naps.push(d);
   }
@@ -46,28 +47,30 @@ async function main() {
     port_count: 4, splitter_ratio: '1:4', area: 'Tulay', notes: 'Feeder split',
   });
 
-  const portOf = (dev, n) => dev.ports.find((p) => p.port_no === n).id;
+  const portOf = (dev, n, kind = 'out') =>
+    dev.ports.find((p) => p.port_no === n && p.port_kind === kind).id;
+  const feedOf = (dev) => portOf(dev, 1, 'in');
 
-  // OLT PON1 -> NAP1 port1, NAP1 port8 -> NAP2 port1 (daisy chain)
+  // OLT PON1 -> NAP1 feeder in; NAP1 out 8 -> NAP2 feeder in (daisy chain)
   await call('/links', 'POST', {
-    from_port_id: portOf(olt, 1), to_port_id: portOf(naps[0], 1),
+    from_port_id: portOf(olt, 1), to_port_id: feedOf(naps[0]),
     cable_length_m: 640, fiber_core: 'Blue 1', cable_type: '12-core ADSS', status: 'active',
   });
   await call('/links', 'POST', {
-    from_port_id: portOf(naps[0], 8), to_port_id: portOf(naps[1], 1),
+    from_port_id: portOf(naps[0], 8), to_port_id: feedOf(naps[1]),
     cable_length_m: 410, fiber_core: 'Orange 2', cable_type: '12-core ADSS', status: 'active',
   });
-  // OLT PON2 -> splitter, splitter -> NAP3 and NAP4
+  // OLT PON2 -> splitter feeder in, splitter -> NAP3 and NAP4
   await call('/links', 'POST', {
-    from_port_id: portOf(olt, 2), to_port_id: portOf(splitter, 1),
+    from_port_id: portOf(olt, 2), to_port_id: feedOf(splitter),
     cable_length_m: 820, fiber_core: 'Green 1', status: 'active',
   });
   await call('/links', 'POST', {
-    from_port_id: portOf(splitter, 2), to_port_id: portOf(naps[2], 1),
+    from_port_id: portOf(splitter, 1), to_port_id: feedOf(naps[2]),
     cable_length_m: 300, status: 'active',
   });
   await call('/links', 'POST', {
-    from_port_id: portOf(splitter, 3), to_port_id: portOf(naps[3], 1),
+    from_port_id: portOf(splitter, 2), to_port_id: feedOf(naps[3]),
     cable_length_m: 950, status: 'planned',
   });
 
@@ -76,7 +79,7 @@ async function main() {
                  'Lim Sari-sari', 'Ompad Household', 'Rosales Residence'];
   let n = 0;
   for (const nap of [naps[0], naps[1], naps[2]]) {
-    for (let port = 2; port <= 4; port++) {
+    for (let port = 1; port <= 3; port++) {
       if (n >= names.length) break;
       const dev = nap.device;
       await call('/subscribers', 'POST', {

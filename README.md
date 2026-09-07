@@ -11,9 +11,16 @@ goes dark when a segment breaks.
   satellite+labels layers. Pins are draggable; positions save on drop.
 - **Devices** — OLT, NAP box, splitter and joint/closure, each with a name,
   model, split ratio, area/barangay, address, status and notes.
-- **Real ports** — every device gets a numbered port grid. Ports carry a label,
-  a status (free / used / reserved / faulty) and notes. Changing a device's port
-  count adds or removes ports, never destroying a port that is in use.
+- **Real ports, in two kinds** — every device has *feeder-in* ports (the cable
+  arriving from upstream) and *output* ports. A 1:8 NAP is one feeder-in plus
+  eight outputs; an OLT is all outputs. Ports carry a label, a status
+  (free / used / reserved / faulty) and notes. Changing a device's port count
+  adds or removes ports, never destroying a port that is in use.
+- **Pigtail colour coding** — output ports are assigned their TIA-598-C colour
+  by position (Blue, Orange, Green, Brown, Slate, White, Red, Black, …). Each
+  device chooses how its ports are labelled: **number**, **pigtail colour**, or
+  **both**. In colour mode the cell is filled with the actual pigtail colour and
+  port status is shown as a ring around it.
 - **Port-to-port links** — connect a specific port on one device to a specific
   port on another (OLT PON → NAP, NAP → NAP daisy chain, splitter fan-out).
   Each link stores cable length, fiber core, cable type and status, and is drawn
@@ -64,6 +71,11 @@ entering the real plant.
 devices ──< ports ──< links (from_port_id ⇄ to_port_id, one link per port)
                  └──< subscribers (one subscriber per port)
 ```
+
+Ports have a `port_kind` of `in` or `out`. A link must have at least one `out`
+end — two feeder-ins cannot face each other — but is otherwise unconstrained, so
+an OLT PON can feed a NAP's input, a NAP output can daisy-chain to the next
+NAP's input, and a closure can be fed from two directions with two inputs.
 
 Feed direction is not stored — anything reachable from an OLT through live links
 is downstream of it. That is what makes impact analysis honest: it recomputes

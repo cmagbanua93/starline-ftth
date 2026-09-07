@@ -75,6 +75,26 @@ CREATE TABLE IF NOT EXISTS ports (
 );
 CREATE INDEX IF NOT EXISTS ports_device_idx ON ports(device_id);
 
+/* --- migrations: feeder-in ports and fiber colour coding --- */
+
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS input_count integer NOT NULL DEFAULT 1;
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS port_labeling text NOT NULL DEFAULT 'number';
+ALTER TABLE ports   ADD COLUMN IF NOT EXISTS port_kind text NOT NULL DEFAULT 'out';
+ALTER TABLE ports   ADD COLUMN IF NOT EXISTS fiber_color text;
+
+DO $$ BEGIN
+  ALTER TABLE devices ADD CONSTRAINT devices_labeling_chk
+    CHECK (port_labeling IN ('number','color','both'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+  ALTER TABLE ports ADD CONSTRAINT ports_kind_chk CHECK (port_kind IN ('in','out'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE ports DROP CONSTRAINT IF EXISTS ports_device_id_port_no_key;
+CREATE UNIQUE INDEX IF NOT EXISTS ports_device_kind_no_idx
+  ON ports(device_id, port_kind, port_no);
+
 CREATE TABLE IF NOT EXISTS links (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   from_port_id  uuid NOT NULL UNIQUE REFERENCES ports(id) ON DELETE CASCADE,
@@ -110,9 +130,45 @@ CREATE TABLE IF NOT EXISTS subscribers (
 CREATE INDEX IF NOT EXISTS subscribers_port_idx ON subscribers(port_id);
 `;
 
+/**
+ * TIA-598-C fiber colour order. Position n in a NAP/splitter maps to colour n,
+ * which is how pigtails are identified in the field.
+ */
+const FIBER_COLORS = [
+  'Blue', 'Orange', 'Green', 'Brown', 'Slate', 'White',
+  'Red', 'Black', 'Yellow', 'Violet', 'Rose', 'Aqua',
+];
+
+// Idempotent: brings pre-existing rows up to the current model. Each statement
+// runs on its own — a parameterised query cannot carry multiple commands.
+const BACKFILL = [
+  // OLTs are all PON outputs; they have no feeder-in port.
+  [`UPDATE devices SET input_count = 0 WHERE type = 'OLT' AND input_count <> 0`],
+
+  // Every passive device needs at least one feeder-in port.
+  [`INSERT INTO ports (device_id, port_no, port_kind, label)
+    SELECT d.id, 1, 'in', 'Feeder in'
+    FROM devices d
+    WHERE d.type <> 'OLT'
+      AND d.input_count > 0
+      AND NOT EXISTS (
+        SELECT 1 FROM ports p WHERE p.device_id = d.id AND p.port_kind = 'in'
+      )`],
+
+  // Give existing output ports their standard pigtail colour.
+  [`UPDATE ports SET fiber_color = c.name
+    FROM (SELECT n, name FROM unnest($1::text[]) WITH ORDINALITY AS t(name, n)) c
+    WHERE ports.fiber_color IS NULL
+      AND ports.port_kind = 'out'
+      AND c.n = ((ports.port_no - 1) % 12) + 1`, () => [FIBER_COLORS]],
+];
+
 async function init() {
   await pool.query(SCHEMA);
+  for (const [sql, params] of BACKFILL) {
+    await pool.query(sql, params ? params() : undefined);
+  }
   console.log('[db] schema ready');
 }
 
-module.exports = { pool, query, withTx, init };
+module.exports = { pool, query, withTx, init, FIBER_COLORS };
