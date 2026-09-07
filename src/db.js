@@ -5,9 +5,14 @@ const connectionString =
   process.env.POSTGRES_URL ||
   'postgres://postgres:postgres@localhost:5432/ftth';
 
-const needsSsl =
-  /railway|render|supabase|neon|amazonaws/i.test(connectionString) &&
-  !/sslmode=disable/i.test(connectionString);
+// Railway's private network (*.railway.internal) speaks plain TCP and rejects
+// SSL outright, so only turn SSL on when the connection string or PGSSLMODE
+// actually asks for it.
+const wantsSsl =
+  /sslmode=require|sslmode=verify/i.test(connectionString) ||
+  /^(require|verify-ca|verify-full)$/i.test(process.env.PGSSLMODE || '');
+const isInternal = /\.railway\.internal|localhost|127\.0\.0\.1/i.test(connectionString);
+const needsSsl = wantsSsl && !isInternal;
 
 const pool = new Pool({
   connectionString,
