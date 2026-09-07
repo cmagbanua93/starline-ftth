@@ -361,6 +361,43 @@ h1, h2, h3, h4, .brand strong, .stat b, .plan-speed { font-family: var(--font-he
   border-radius: 5px 5px 0 0;
 }
 
+/* ---------------------- closure splice table ----------------------- */
+
+.splice-head, .splice-row {
+  display: grid;
+  grid-template-columns: 54px 1fr 14px 1fr;
+  gap: 6px;
+  align-items: center;
+}
+.splice-head {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: .1em;
+  color: var(--txt-3); margin-bottom: 5px; padding: 0 2px;
+}
+.splice-table { display: flex; flex-direction: column; gap: 4px; }
+.splice-row { font-size: 11.5px; }
+
+.splice-core {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-weight: 700; color: var(--txt-2); font-size: 11px;
+}
+.splice-core .swatch { width: 10px; height: 10px; margin: 0; }
+
+.splice-arrow { color: var(--txt-3); text-align: center; font-size: 11px; }
+
+.splice-cell {
+  display: block; padding: 5px 8px; border-radius: 7px;
+  background: var(--bg-3); border: 1px solid var(--line);
+  color: var(--txt-2); cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.splice-cell:hover { border-color: var(--gold); color: var(--txt); }
+.splice-cell.free { color: var(--txt-3); border-style: dashed; }
+.splice-cell.used { background: #10304f; border-color: #2c6491; color: #9fd2ff; }
+.splice-cell.sub { background: #123528; border-color: #1f6b4d; color: #7ff0c0; }
+.splice-cell.cut { background: #3a1a20; border-color: #7a2f3b; color: #ff9aa6; }
+.splice-cell.dimmed { opacity: .35; }
+.splice-cell.empty-cell { cursor: default; border: 0; background: none; text-align: center; }
+
 .ring-key {
   display: flex; flex-wrap: wrap; gap: 4px 12px;
   margin-top: 7px; font-size: 10.5px; color: var(--txt-3);

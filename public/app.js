@@ -556,12 +556,16 @@ function statusPill(v) {
 /** Human name for a port: "Feeder in", "port 3", or "port 3 (Green)". */
 function portName(p) {
   if (!p) return 'port ?';
-  if (p.port_kind === 'in') {
-    const dev = state.byDevice.get(p.device_id);
-    return dev && dev.input_count > 1 ? `feeder in ${p.port_no}` : 'feeder in';
-  }
   const dev = state.byDevice.get(p.device_id);
   const cm = colorMeta(p.fiber_color);
+
+  // In a closure a port is one side of a fusion splice on a numbered core.
+  if (dev?.type === 'JOINT') {
+    return `core ${p.port_no}${cm ? ' ' + cm.name.toLowerCase() : ''} ${p.port_kind === 'in' ? 'in' : 'out'}`;
+  }
+  if (p.port_kind === 'in') {
+    return dev && dev.input_count > 1 ? `feeder in ${p.port_no}` : 'feeder in';
+  }
   return cm && dev?.port_labeling && dev.port_labeling !== 'number'
     ? `port ${p.port_no} (${cm.name})`
     : `port ${p.port_no}`;
@@ -611,10 +615,68 @@ function portCellHtml(p, labeling) {
           </div>`;
 }
 
+/**
+ * A closure is a column of fusion splices: core n arrives on its in side and
+ * continues from its out side. Both sides carry the core's colour.
+ */
+function spliceTableHtml(device, pickTarget) {
+  const ports = state.portsOf.get(device.id) || [];
+  const ins = new Map(ports.filter((p) => p.port_kind === 'in').map((p) => [p.port_no, p]));
+  const outs = new Map(ports.filter((p) => p.port_kind === 'out').map((p) => [p.port_no, p]));
+  const cores = [...new Set([...ins.keys(), ...outs.keys()])].sort((a, b) => a - b);
+  if (!cores.length) return '<div class="empty">No cores configured. Set a core count below.</div>';
+
+  const side = (p) => {
+    if (!p) return '<span class="splice-cell empty-cell">—</span>';
+    const link = state.linkByPort.get(p.id);
+    const sub = state.subByPort.get(p.id);
+    let label = 'free';
+    let cls = 'free';
+    if (link) {
+      const otherId = link.from_port_id === p.id ? link.to_port_id : link.from_port_id;
+      const op = state.byPort.get(otherId);
+      const od = op ? state.byDevice.get(op.device_id) : null;
+      label = `${od?.name || '?'} · ${portName(op)}`;
+      cls = link.status === 'cut' ? 'cut' : 'used';
+    } else if (sub) {
+      label = sub.name;
+      cls = 'sub';
+    }
+    const picking = state.mode?.kind === 'connect' || state.mode?.kind === 'move';
+    const held = state.mode?.kind === 'move' && link?.id === state.mode.linkId;
+    const dim = picking && (link || sub) && !held ? ' dimmed' : '';
+    return `<span class="splice-cell ${cls}${dim}" data-port="${p.id}"
+              title="${esc(label)}">${esc(label)}</span>`;
+  };
+
+  const rows = cores.map((n) => {
+    const cm = colorMeta((ins.get(n) || outs.get(n))?.fiber_color);
+    return `<div class="splice-row">
+      <span class="splice-core" title="${esc(cm?.name || 'core ' + n)}">
+        <i class="swatch" style="background:${cm?.hex || '#666'}"></i>${n}
+      </span>
+      ${side(ins.get(n))}
+      <span class="splice-arrow">⇢</span>
+      ${side(outs.get(n))}
+    </div>`;
+  }).join('');
+
+  return `
+    <p class="hint">Each row is one fusion splice: the core arrives on the left and
+      continues on the right, keeping its colour.${
+        pickTarget ? ' Click the side this cable lands on.' : ''}</p>
+    <div class="splice-head">
+      <span>Core</span><span>Arrives from</span><span></span><span>Continues to</span>
+    </div>
+    <div class="splice-table">${rows}</div>`;
+}
+
 function portGridHtml(device, opts = {}) {
   // Any device opened while a link is being drawn is a candidate target.
   const picking = state.mode?.kind === 'connect' || state.mode?.kind === 'move';
   const pickTarget = opts.pickTarget || picking;
+  if (device.type === 'JOINT') return spliceTableHtml(device, pickTarget);
+
   const ports = state.portsOf.get(device.id) || [];
   if (!ports.length) return '<div class="empty">No ports configured. Set a port count below.</div>';
   const labeling = device.port_labeling || 'number';
@@ -669,8 +731,10 @@ function openDevice(deviceId, opts = {}) {
       ${d.splitter_ratio ? `<li><span class="k">Split ratio</span><span class="v">${esc(d.splitter_ratio)}</span></li>` : ''}
       ${d.area ? `<li><span class="k">Area</span><span class="v">${esc(d.area)}</span></li>` : ''}
       ${d.address ? `<li><span class="k">Address</span><span class="v">${esc(d.address)}</span></li>` : ''}
-      <li><span class="k">Output ports</span><span class="v">${cap.used} used · ${cap.free} free · ${cap.total} total</span></li>
-      ${d.input_count ? `<li><span class="k">Feeder in</span><span class="v">${d.input_count} port${d.input_count > 1 ? 's' : ''}</span></li>` : ''}
+      ${d.type === 'JOINT'
+        ? `<li><span class="k">Cores</span><span class="v">${cap.used} spliced onward · ${cap.free} spare · ${cap.total} total</span></li>`
+        : `<li><span class="k">Output ports</span><span class="v">${cap.used} used · ${cap.free} free · ${cap.total} total</span></li>
+           ${d.input_count ? `<li><span class="k">Feeder in</span><span class="v">${d.input_count} port${d.input_count > 1 ? 's' : ''}</span></li>` : ''}`}
       <li><span class="k">Subscribers</span><span class="v">${cap.subscribers}</span></li>
       <li><span class="k">Coordinates</span><span class="v">${d.lat.toFixed(6)}, ${d.lng.toFixed(6)}</span></li>
       ${d.notes ? `<li><span class="k">Notes</span><span class="v">${esc(d.notes)}</span></li>` : ''}
@@ -690,7 +754,7 @@ function openDevice(deviceId, opts = {}) {
   `;
   openDrawer(meta.label, d.name, html);
 
-  $('#drawer-body').querySelectorAll('.port').forEach((el) => {
+  $('#drawer-body').querySelectorAll('[data-port]').forEach((el) => {
     el.addEventListener('click', () => {
       const portId = el.dataset.port;
       if (state.mode && state.mode.kind === 'connect') return completeConnect(portId);
@@ -743,7 +807,11 @@ function openPort(portId) {
   const html = `
     <ul class="info-list">
       <li><span class="k">Device</span><span class="v">${esc(dev?.name || '')}</span></li>
-      <li><span class="k">Role</span><span class="v">${p.port_kind === 'in' ? 'Feeder in (from upstream)' : 'Output / drop'}</span></li>
+      <li><span class="k">Role</span><span class="v">${
+        dev?.type === 'JOINT'
+          ? (p.port_kind === 'in' ? 'Splice — arriving side' : 'Splice — continuing side')
+          : (p.port_kind === 'in' ? 'Feeder in (from upstream)' : 'Output / drop')
+      }</span></li>
       ${cm ? `<li><span class="k">Pigtail colour</span><span class="v">
         <span class="swatch" style="background:${cm.hex}"></span>${esc(cm.name)}</span></li>` : ''}
       <li><span class="k">Port status</span><span class="v">${statusPill(p.status)}</span></li>
@@ -767,9 +835,11 @@ function openPort(portId) {
       <button class="btn ghost" data-act="back">← Back to device</button>
     </div>
   `;
-  const heading = p.port_kind === 'in'
-    ? (dev?.input_count > 1 ? `Feeder in ${p.port_no}` : 'Feeder in')
-    : `Port ${p.port_no}${cm && dev?.port_labeling !== 'number' ? ' · ' + cm.name : ''}`;
+  const heading = dev?.type === 'JOINT'
+    ? `Core ${p.port_no}${cm ? ' · ' + cm.name : ''} — ${p.port_kind === 'in' ? 'in' : 'out'}`
+    : p.port_kind === 'in'
+      ? (dev?.input_count > 1 ? `Feeder in ${p.port_no}` : 'Feeder in')
+      : `Port ${p.port_no}${cm && dev?.port_labeling !== 'number' ? ' · ' + cm.name : ''}`;
   openDrawer(`${dev?.name || 'Device'} · ${heading}`, heading, html);
 
   const body = $('#drawer-body');
@@ -1050,8 +1120,10 @@ async function completeConnect(toPortId) {
   const da = state.byDevice.get(fp.device_id);
   const db = state.byDevice.get(tp.device_id);
 
-  // Unusual, but not forbidden — a closure can be spliced either way round.
-  if (fp.port_kind === 'in' && tp.port_kind === 'in') {
+  // Unusual, but not forbidden. Closures are exempt: both sides of a splice are
+  // ordinary places for a cable to land.
+  const involvesJoint = da.type === 'JOINT' || db.type === 'JOINT';
+  if (!involvesJoint && fp.port_kind === 'in' && tp.port_kind === 'in') {
     const ok = confirm(
       `Both ends are feeder-in ports.\n\n` +
       `Usually the upstream cable lands on a feeder-in and leaves again from an ` +
@@ -1066,7 +1138,7 @@ async function completeConnect(toPortId) {
 
   // Landing an arriving cable on an output port while the box's feeder-in sits
   // empty is the classic mis-wire — say so before it is saved.
-  const freeFeeder = (state.portsOf.get(tp.device_id) || []).find(
+  const freeFeeder = db.type === 'JOINT' ? null : (state.portsOf.get(tp.device_id) || []).find(
     (p) => p.port_kind === 'in' && !state.linkByPort.has(p.id) && !state.subByPort.has(p.id)
   );
   const feederNudge = tp.port_kind === 'out' && freeFeeder
@@ -1174,13 +1246,15 @@ function deviceFormHtml(d, type) {
         </select></div>
     </div>
     <div class="field-row">
-      <div class="field"><label>Output ports (${esc(meta.hint)})</label>
+      <div class="field"><label>${t === 'JOINT' ? 'Cores (splices)' : `Output ports (${esc(meta.hint)})`}</label>
         <input id="d-ports" type="number" min="0" max="256" value="${d?.port_count ?? meta.defaultPorts}" /></div>
-      <div class="field"><label>Feeder-in ports</label>
+      <div class="field" id="d-inputs-field" ${t === 'JOINT' ? 'style="display:none"' : ''}>
+        <label>Feeder-in ports</label>
         <input id="d-inputs" type="number" min="0" max="8" value="${d?.input_count ?? meta.defaultIn}" /></div>
     </div>
-    <p class="hint">A 1:8 NAP is 1 feeder in + 8 out. Use 2 feeder-ins for a loop-through
-      closure fed from both directions.</p>
+    <p class="hint" id="d-ports-hint">${t === 'JOINT'
+      ? 'Each core is one fusion splice with an in side and an out side — an 8-core closure is 8 splices.'
+      : 'A 1:8 NAP is 1 feeder in + 8 out. Use 2 feeder-ins for a loop-through closure fed from both directions.'}</p>
     <div class="field-row">
       <div class="field"><label>Split ratio</label>
         <input id="d-ratio" value="${esc(d?.splitter_ratio || '')}" placeholder="1:8, 1:16…" /></div>
@@ -1199,6 +1273,19 @@ function deviceFormHtml(d, type) {
       <input id="d-address" value="${esc(d?.address || '')}" placeholder="Pole number, house reference…" /></div>
     <div class="field"><label>Notes</label><textarea id="d-notes">${esc(d?.notes || '')}</textarea></div>
   `;
+}
+
+/** A closure is configured by core count alone; everything else has two counts. */
+function applyTypeToDeviceForm(type) {
+  const isJoint = type === 'JOINT';
+  const portsLabel = $('#d-ports').closest('.field').querySelector('label');
+  portsLabel.textContent = isJoint
+    ? 'Cores (splices)'
+    : `Output ports (${TYPE_META[type]?.hint || 'ports'})`;
+  $('#d-inputs-field').style.display = isJoint ? 'none' : '';
+  $('#d-ports-hint').textContent = isJoint
+    ? 'Each core is one fusion splice with an in side and an out side — an 8-core closure is 8 splices.'
+    : 'A 1:8 NAP is 1 feeder in + 8 out. Use 2 feeder-ins for a loop-through closure fed from both directions.';
 }
 
 function readDeviceForm() {
@@ -1230,6 +1317,7 @@ function openNewDeviceModal(type, latlng) {
         if (!m) return;
         $('#d-ports').value = m.defaultPorts;
         $('#d-inputs').value = m.defaultIn;
+        applyTypeToDeviceForm(e.target.value);
       });
     },
     onConfirm: async () => {
@@ -1248,6 +1336,9 @@ function openEditDeviceModal(d) {
   openModal({
     title: `Edit ${d.name}`,
     body: deviceFormHtml(d),
+    afterOpen: () => {
+      $('#d-type').addEventListener('change', (e) => applyTypeToDeviceForm(e.target.value));
+    },
     onConfirm: async () => {
       const body = readDeviceForm();
       if (!body.name.trim()) throw new Error('Give the device a name');

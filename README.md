@@ -17,6 +17,13 @@ goes dark when a segment breaks.
   eight outputs; an OLT is all outputs. Ports carry a label, a status
   (free / used / reserved / faulty) and notes. Changing a device's port count
   adds or removes ports, never destroying a port that is in use.
+- **Closures are splices, not patch panels** — a joint closure has no ports in
+  the NAP sense. Each core is one fusion splice with an arriving side and a
+  continuing side, both carrying that core's colour: white in, white out. The
+  closure shows as a splice table — core, arrives from, continues to — and a
+  cable passing through it is two links joined at the splice, so tracing goes
+  *through* the closure rather than around it. Cores are independent: cutting the
+  feeder on core 1 leaves core 5's traffic alone.
 - **Pigtail colour coding** — output ports are assigned their TIA-598-C colour
   by position (Blue, Orange, Green, Brown, Slate, White, Red, Black, …). Each
   device chooses how its ports are labelled: **number**, **pigtail colour**, or
@@ -89,8 +96,13 @@ be fed from two directions with two inputs. Joining two feeder-ins is unusual
 enough that the UI asks first, but it is allowed — a splice closure joins cores in
 whatever direction the plant actually runs.
 
-Feed direction is not stored — anything reachable from an OLT through live links
-is downstream of it. That is what makes impact analysis honest: it recomputes
+Reachability is computed over **ports**, not devices, because what is joined
+inside a box differs by type: a closure joins core n's in side to core n's out
+side and nothing else; a NAP or splitter feeds every output from its feeder;
+an OLT's PON ports are independent sources.
+
+Feed direction is not stored — anything reachable from an OLT through live
+splices and links is downstream of it. That is what makes impact analysis honest: it recomputes
 reachability with the failed element removed instead of relying on a hand-drawn
 hierarchy.
 

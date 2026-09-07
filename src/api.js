@@ -68,25 +68,28 @@ router.get('/network', async (req, res, next) => {
  * Output ports are given their TIA-598-C pigtail colour by position, because
  * that is how they are identified in the field.
  */
-async function syncPorts(client, deviceId, outCount, inCount) {
+async function syncPorts(client, deviceId, outCount, inCount, deviceType) {
   const existing = await client.query(
     'SELECT id, port_no, port_kind, status FROM ports WHERE device_id = $1 ORDER BY port_kind, port_no',
     [deviceId]
   );
 
+  const isJoint = deviceType === 'JOINT';
   const wanted = { in: inCount, out: outCount };
   for (const kind of ['in', 'out']) {
     const have = new Set(existing.rows.filter((r) => r.port_kind === kind).map((r) => r.port_no));
     for (let n = 1; n <= wanted[kind]; n++) {
       if (have.has(n)) continue;
+      // In a closure both sides of a splice carry the core's colour: white in,
+      // white out. Elsewhere only the output ports are colour-coded pigtails.
+      const color = isJoint || kind === 'out' ? colorFor(n) : null;
+      const label = !isJoint && kind === 'in'
+        ? (wanted.in > 1 ? `Feeder in ${n}` : 'Feeder in')
+        : null;
       await client.query(
         `INSERT INTO ports (device_id, port_no, port_kind, fiber_color, label)
          VALUES ($1, $2, $3, $4, $5)`,
-        [
-          deviceId, n, kind,
-          kind === 'out' ? colorFor(n) : null,
-          kind === 'in' ? (wanted.in > 1 ? `Feeder in ${n}` : 'Feeder in') : null,
-        ]
+        [deviceId, n, kind, color, label]
       );
     }
 
@@ -115,11 +118,12 @@ router.post('/devices', async (req, res, next) => {
     const name = clean(b.name);
     if (!name) return bad(res, 'name required');
     const portCount = Math.max(0, Math.min(256, parseInt(b.port_count, 10) || 8));
+    // A closure is a set of splices: every core has an in side and an out side,
+    // so its two counts always match.
     const defaultIn = b.type === 'OLT' ? 0 : 1;
-    const inputCount = Math.max(
-      0,
-      Math.min(8, b.input_count === undefined ? defaultIn : parseInt(b.input_count, 10) || 0)
-    );
+    const inputCount = b.type === 'JOINT'
+      ? portCount
+      : Math.max(0, Math.min(8, b.input_count === undefined ? defaultIn : parseInt(b.input_count, 10) || 0));
     const status = DEVICE_STATUS.includes(b.status) ? b.status : 'active';
     const labeling = LABELING.includes(b.port_labeling) ? b.port_labeling : 'number';
 
@@ -133,7 +137,7 @@ router.post('/devices', async (req, res, next) => {
           clean(b.splitter_ratio), clean(b.area), clean(b.address), clean(b.notes),
         ]
       );
-      await syncPorts(client, r.rows[0].id, portCount, inputCount);
+      await syncPorts(client, r.rows[0].id, portCount, inputCount, b.type);
       return r.rows[0];
     });
 
@@ -192,6 +196,18 @@ router.patch('/devices/:id', async (req, res, next) => {
       inputCount = Math.max(0, Math.min(8, parseInt(b.input_count, 10) || 0));
       set('input_count', inputCount);
     }
+
+    // Keep a closure's two sides matched: every core is in + out.
+    const existing = await query('SELECT type, port_count, input_count FROM devices WHERE id = $1', [
+      req.params.id,
+    ]);
+    if (!existing.rowCount) return res.status(404).json({ error: 'device not found' });
+    const finalType = b.type !== undefined ? b.type : existing.rows[0].type;
+    if (finalType === 'JOINT') {
+      const cores = portCount !== undefined ? portCount : existing.rows[0].port_count;
+      if (inputCount !== cores) { inputCount = cores; set('input_count', cores); }
+    }
+
     if (!fields.length) return bad(res, 'nothing to update');
     set('updated_at', new Date());
     values.push(req.params.id);
@@ -202,12 +218,13 @@ router.patch('/devices/:id', async (req, res, next) => {
         values
       );
       if (!r.rowCount) return null;
-      if (portCount !== undefined || inputCount !== undefined) {
+      if (portCount !== undefined || inputCount !== undefined || b.type !== undefined) {
         await syncPorts(
           client,
           req.params.id,
           portCount !== undefined ? portCount : r.rows[0].port_count,
-          inputCount !== undefined ? inputCount : r.rows[0].input_count
+          inputCount !== undefined ? inputCount : r.rows[0].input_count,
+          r.rows[0].type
         );
       }
       return r.rows[0];

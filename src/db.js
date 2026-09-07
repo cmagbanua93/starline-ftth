@@ -161,6 +161,41 @@ const BACKFILL = [
     WHERE ports.fiber_color IS NULL
       AND ports.port_kind = 'out'
       AND c.n = ((ports.port_no - 1) % 12) + 1`, () => [FIBER_COLORS]],
+
+  /* --- a closure is a set of splices, not a box with one feeder --- */
+
+  // Core n has an in side and an out side, so the two counts always match.
+  [`UPDATE devices SET input_count = port_count
+    WHERE type = 'JOINT' AND input_count <> port_count`],
+
+  // Create the missing in sides for closures that predate this model.
+  [`INSERT INTO ports (device_id, port_no, port_kind)
+    SELECT d.id, g.n, 'in'
+    FROM devices d
+    CROSS JOIN LATERAL generate_series(1, GREATEST(d.port_count, 0)) AS g(n)
+    WHERE d.type = 'JOINT'
+      AND NOT EXISTS (
+        SELECT 1 FROM ports p
+        WHERE p.device_id = d.id AND p.port_kind = 'in' AND p.port_no = g.n
+      )`],
+
+  // Both sides of a splice carry the core's colour — white in, white out.
+  [`UPDATE ports SET fiber_color = c.name
+    FROM (SELECT n, name FROM unnest($1::text[]) WITH ORDINALITY AS t(name, n)) c,
+         devices d
+    WHERE ports.device_id = d.id
+      AND d.type = 'JOINT'
+      AND ports.port_kind = 'in'
+      AND ports.fiber_color IS NULL
+      AND c.n = ((ports.port_no - 1) % 12) + 1`, () => [FIBER_COLORS]],
+
+  // "Feeder in" is the wrong word inside a closure; the core number says it.
+  [`UPDATE ports SET label = NULL
+    FROM devices d
+    WHERE ports.device_id = d.id
+      AND d.type = 'JOINT'
+      AND ports.port_kind = 'in'
+      AND ports.label LIKE 'Feeder in%'`],
 ];
 
 async function init() {
