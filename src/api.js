@@ -1,6 +1,7 @@
 const express = require('express');
 const { query, withTx, FIBER_COLORS } = require('./db');
 const graph = require('./graph');
+const backups = require('./backups');
 
 const router = express.Router();
 
@@ -639,6 +640,44 @@ router.get('/export', async (req, res, next) => {
     const net = await loadNetwork();
     res.setHeader('Content-Disposition', 'attachment; filename="ftth-network.json"');
     res.json({ exportedAt: new Date().toISOString(), ...net });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/* ticketing backups stored here (see src/backups.js)                  */
+/* ------------------------------------------------------------------ */
+
+router.get('/backups', async (req, res, next) => {
+  try {
+    res.json({ backups: await backups.list(req.query.limit) });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/* Download one stored copy as the db.json it came from, ready to drop back
+   onto the ticketing volume. */
+router.get('/backups/:id', async (req, res, next) => {
+  try {
+    const row = await backups.fetchOne(req.params.id);
+    if (!row) return res.status(404).json({ error: 'backup not found' });
+    const stamp = new Date(row.taken_at).toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="db-${stamp}.json"`);
+    res.send(row.payload);
+  } catch (e) {
+    next(e);
+  }
+});
+
+/* Run a backup immediately instead of waiting for the daily timer. */
+router.post('/backups/run', async (req, res, next) => {
+  try {
+    const result = await backups.runOnce();
+    if (!result) return res.status(502).json({ error: 'backup failed — see server logs' });
+    res.json({ ok: true, ...result });
   } catch (e) {
     next(e);
   }

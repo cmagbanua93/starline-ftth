@@ -128,6 +128,18 @@ CREATE TABLE IF NOT EXISTS subscribers (
   updated_at  timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS subscribers_port_idx ON subscribers(port_id);
+
+/* --- off-volume copies of the ticketing database (see src/backups.js) --- */
+
+CREATE TABLE IF NOT EXISTS ops_backups (
+  id        bigserial PRIMARY KEY,
+  taken_at  timestamptz NOT NULL DEFAULT now(),
+  source    text NOT NULL,
+  counts    jsonb,
+  bytes     integer NOT NULL,
+  payload   text NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ops_backups_taken_idx ON ops_backups(taken_at DESC);
 `;
 
 /**

@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const express = require('express');
 const cookieParser = require('cookie-parser');
 const db = require('./db');
+const backups = require('./backups');
 const { router: api } = require('./api');
 
 const app = express();
@@ -85,6 +86,7 @@ async function start() {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`StarLine FTTH Network listening on ${PORT}`);
     if (!APP_PASSWORD) console.log('[auth] APP_PASSWORD not set — the app is open to anyone with the URL');
+    if (ready) backups.start();
   });
 }
 
