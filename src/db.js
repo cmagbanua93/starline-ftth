@@ -140,6 +140,23 @@ CREATE TABLE IF NOT EXISTS ops_backups (
   payload   text NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ops_backups_taken_idx ON ops_backups(taken_at DESC);
+
+/* --- installations driven from the ticketing system --- */
+
+/* A port held for a job that is on its way. Without this, two technicians
+   working the same barangay can claim the same port on the same morning. */
+ALTER TABLE ports ADD COLUMN IF NOT EXISTS reserved_for text;
+ALTER TABLE ports ADD COLUMN IF NOT EXISTS reserved_at  timestamptz;
+
+/* Which ticket put this subscriber here, and who they are in billing. The
+   ticket id also makes the install write idempotent: a retry finds the row
+   already there instead of creating a second one. */
+ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS installed_by_ticket text;
+ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS account_no text;
+CREATE UNIQUE INDEX IF NOT EXISTS subscribers_ticket_idx
+  ON subscribers (installed_by_ticket) WHERE installed_by_ticket IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS subscribers_pppoe_lower_idx
+  ON subscribers (lower(pppoe_username)) WHERE pppoe_username IS NOT NULL;
 `;
 
 /**

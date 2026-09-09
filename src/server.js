@@ -11,6 +11,9 @@ const PORT = process.env.PORT || 3000;
 const APP_PASSWORD = process.env.APP_PASSWORD || '';
 const SESSION_SECRET =
   process.env.SESSION_SECRET || crypto.randomBytes(24).toString('hex');
+/* Other StarLine services (the ticketing system) call this API with a shared
+   key instead of a browser session. Unset means no service may call in. */
+const API_TOKEN = process.env.API_TOKEN || '';
 
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '2mb' }));
@@ -54,8 +57,17 @@ app.get('/api/session', (req, res) =>
   res.json({ authed: authed(req), passwordRequired: Boolean(APP_PASSWORD) })
 );
 
+/* A service key is accepted alongside the browser session, compared in constant
+   time so it cannot be probed byte by byte. */
+function serviceKeyOk(req) {
+  if (!API_TOKEN) return false;
+  const supplied = Buffer.from(String(req.headers['x-api-key'] || ''));
+  const expected = Buffer.from(API_TOKEN);
+  return supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
+}
+
 app.use('/api', (req, res, next) => {
-  if (authed(req)) return next();
+  if (authed(req) || serviceKeyOk(req)) return next();
   res.status(401).json({ error: 'Not signed in' });
 });
 

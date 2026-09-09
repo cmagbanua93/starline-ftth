@@ -683,4 +683,198 @@ router.post('/backups/run', async (req, res, next) => {
   }
 });
 
+/* ------------------------------------------------------------------ */
+/* installations driven from the ticketing system                      */
+/* ------------------------------------------------------------------ */
+
+function metresBetween(lat1, lng1, lat2, lng2) {
+  const R = 6371000, toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1), dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+/**
+ * Boxes a technician could drop a new subscriber onto, with every output port
+ * and its true state. "Free" means free in fact, not merely flagged free: a port
+ * carrying a fiber link or already holding a subscriber is occupied whatever its
+ * status column says.
+ */
+router.get('/nap-candidates', async (req, res, next) => {
+  try {
+    const q = String(req.query.q || '').trim().toLowerCase();
+    const lat = asNum(req.query.lat);
+    const lng = asNum(req.query.lng);
+
+    const [devices, ports, links, subs] = await Promise.all([
+      query(`SELECT id, name, type, area, lat, lng, status, port_labeling
+             FROM devices WHERE type IN ('NAP','SPLITTER') ORDER BY name`).then((r) => r.rows),
+      query(`SELECT id, device_id, port_no, label, status, fiber_color, reserved_for
+             FROM ports WHERE port_kind = 'out' ORDER BY device_id, port_no`).then((r) => r.rows),
+      query('SELECT from_port_id, to_port_id FROM links').then((r) => r.rows),
+      query('SELECT port_id FROM subscribers WHERE port_id IS NOT NULL').then((r) => r.rows),
+    ]);
+
+    const taken = new Set();
+    for (const l of links) { taken.add(l.from_port_id); taken.add(l.to_port_id); }
+    for (const s of subs) taken.add(s.port_id);
+
+    const byDevice = new Map();
+    for (const p of ports) {
+      let state = 'free';
+      if (taken.has(p.id) || p.status === 'used') state = 'occupied';
+      else if (p.status === 'faulty') state = 'faulty';
+      else if (p.status === 'reserved') state = 'reserved';
+      if (!byDevice.has(p.device_id)) byDevice.set(p.device_id, []);
+      byDevice.get(p.device_id).push({
+        id: p.id, port_no: p.port_no, label: p.label,
+        fiber_color: p.fiber_color, state, reserved_for: p.reserved_for,
+      });
+    }
+
+    let naps = devices.map((d) => {
+      const ps = byDevice.get(d.id) || [];
+      const count = (s) => ps.filter((p) => p.state === s).length;
+      return {
+        id: d.id, name: d.name, type: d.type, area: d.area,
+        lat: d.lat, lng: d.lng, status: d.status, port_labeling: d.port_labeling,
+        ports: ps,
+        counts: { total: ps.length, free: count('free'), reserved: count('reserved'),
+                  occupied: count('occupied'), faulty: count('faulty') },
+        distance_m: (lat != null && lng != null && d.lat != null && d.lng != null)
+          ? Math.round(metresBetween(lat, lng, d.lat, d.lng)) : null,
+      };
+    });
+
+    if (q) {
+      naps = naps.filter((d) =>
+        String(d.name || '').toLowerCase().includes(q) ||
+        String(d.area || '').toLowerCase().includes(q));
+    }
+    // Nearest first when we know where the technician is; otherwise the boxes
+    // with the most room, so a full NAP never tops the list.
+    naps.sort((a, b) => {
+      if (a.distance_m != null && b.distance_m != null) return a.distance_m - b.distance_m;
+      if (a.counts.free !== b.counts.free) return b.counts.free - a.counts.free;
+      return String(a.name).localeCompare(String(b.name));
+    });
+
+    res.json({ naps });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/* Shared checks: is this port genuinely available to `ticketId`? */
+async function portBlocker(client, port, ticketId) {
+  if (port.port_kind === 'in') return { code: 400, error: 'a subscriber cannot sit on a feeder-in port' };
+  const linked = await client.query('SELECT 1 FROM links WHERE from_port_id = $1 OR to_port_id = $1', [port.id]);
+  if (linked.rowCount) return { code: 409, error: 'that port carries a fiber link' };
+  const held = await client.query('SELECT 1 FROM subscribers WHERE port_id = $1', [port.id]);
+  if (held.rowCount) return { code: 409, error: 'that port already has a subscriber' };
+  if (port.status === 'faulty') return { code: 409, error: 'that port is marked faulty' };
+  if (port.status === 'used') return { code: 409, error: 'that port is already in use' };
+  if (port.status === 'reserved' && port.reserved_for && port.reserved_for !== ticketId) {
+    return { code: 409, error: 'that port is already held for another job' };
+  }
+  return null;
+}
+
+/* Hold a port for a job on its way, so two technicians cannot claim it. */
+router.post('/ports/:id/reserve', async (req, res, next) => {
+  try {
+    const ticketId = clean((req.body || {}).ticketId);
+    if (!ticketId) return bad(res, 'ticketId required');
+
+    const out = await withTx(async (client) => {
+      const r = await client.query('SELECT * FROM ports WHERE id = $1 FOR UPDATE', [req.params.id]);
+      if (!r.rowCount) return { code: 404, error: 'port not found' };
+      const port = r.rows[0];
+      const blocked = await portBlocker(client, port, ticketId);
+      if (blocked) return blocked;
+      const u = await client.query(
+        `UPDATE ports SET status = 'reserved', reserved_for = $2, reserved_at = now()
+         WHERE id = $1 RETURNING *`, [port.id, ticketId]);
+      const d = await client.query('SELECT name, area FROM devices WHERE id = $1', [port.device_id]);
+      return { port: u.rows[0], device: d.rows[0] || null };
+    });
+
+    if (out.error) return res.status(out.code).json({ error: out.error });
+    res.json(out);
+  } catch (e) {
+    next(e);
+  }
+});
+
+/* Let a held port go — the job was cancelled, or the technician chose another. */
+router.post('/ports/:id/release', async (req, res, next) => {
+  try {
+    const ticketId = clean((req.body || {}).ticketId);
+    const r = await query(
+      `UPDATE ports SET status = 'free', reserved_for = NULL, reserved_at = NULL
+       WHERE id = $1 AND status = 'reserved'
+         AND ($2::text IS NULL OR reserved_for IS NULL OR reserved_for = $2)
+       RETURNING *`, [req.params.id, ticketId]);
+    if (!r.rowCount) return res.status(409).json({ error: 'that port is not held for this job' });
+    res.json({ port: r.rows[0] });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * A completed installation: put the subscriber on the port and mark it used, in
+ * one transaction. Idempotent by ticket id, so the ticketing system can retry a
+ * failed call for as long as it takes without risking a duplicate.
+ */
+router.post('/installations', async (req, res, next) => {
+  const b = req.body || {};
+  const ticketId = clean(b.ticketId);
+  const portId = clean(b.portId);
+  const s = b.subscriber || {};
+  if (!ticketId) return bad(res, 'ticketId required');
+  if (!portId) return bad(res, 'portId required');
+  if (!clean(s.name)) return bad(res, 'subscriber name required');
+
+  try {
+    const out = await withTx(async (client) => {
+      const seen = await client.query('SELECT * FROM subscribers WHERE installed_by_ticket = $1', [ticketId]);
+      if (seen.rowCount) return { already: true, subscriber: seen.rows[0] };
+
+      const pr = await client.query('SELECT * FROM ports WHERE id = $1 FOR UPDATE', [portId]);
+      if (!pr.rowCount) return { code: 404, error: 'port not found' };
+      const port = pr.rows[0];
+      const blocked = await portBlocker(client, port, ticketId);
+      if (blocked) return blocked;
+
+      const ins = await client.query(
+        `INSERT INTO subscribers
+           (port_id, name, address, phone, pppoe_username, plan, onu_serial, status,
+            lat, lng, drop_length_m, installed_on, notes, installed_by_ticket, account_no)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'active',$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+        [portId, clean(s.name), clean(s.address), clean(s.phone), clean(s.pppoe_username),
+         clean(s.plan), clean(s.onu_serial), asNum(s.lat), asNum(s.lng), asNum(s.drop_length_m),
+         clean(s.installed_on), clean(s.notes), ticketId, clean(s.account_no)]
+      );
+      await client.query(
+        `UPDATE ports SET status = 'used', reserved_for = NULL, reserved_at = NULL WHERE id = $1`,
+        [portId]);
+      return { subscriber: ins.rows[0] };
+    });
+
+    if (out.error) return res.status(out.code).json({ error: out.error });
+    res.status(out.already ? 200 : 201).json(out);
+  } catch (e) {
+    // Losing a race, or a PPPoE username already on the map, should read as a
+    // plain conflict rather than a 500.
+    if (e && e.code === '23505') {
+      const again = await query('SELECT * FROM subscribers WHERE installed_by_ticket = $1', [ticketId]);
+      if (again.rowCount) return res.json({ already: true, subscriber: again.rows[0] });
+      return res.status(409).json({ error: 'that PPPoE username is already on the map' });
+    }
+    next(e);
+  }
+});
+
 module.exports = { router, loadNetwork };
