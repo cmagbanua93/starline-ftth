@@ -1267,12 +1267,105 @@ function deviceFormHtml(d, type) {
     </div>
     <div class="field-row">
       <div class="field"><label>Model</label><input id="d-model" value="${esc(d?.model || '')}" placeholder="e.g. Huawei MA5608T" /></div>
-      <div class="field"><label>Area / barangay</label><input id="d-area" value="${esc(d?.area || '')}" placeholder="e.g. Tunghaan" /></div>
+      <div class="field"><label>Area code (billing)</label>
+        <input id="d-area" list="d-area-options" value="${esc(d?.area || '')}"
+               placeholder="pick or type" oninput="areaPicked()" onchange="areaPicked()" />
+        <datalist id="d-area-options"></datalist>
+        <p class="hint" id="d-area-hint">Loading area codes…</p></div>
     </div>
     <div class="field"><label>Address / landmark</label>
       <input id="d-address" value="${esc(d?.address || '')}" placeholder="Pole number, house reference…" /></div>
     <div class="field"><label>Notes</label><textarea id="d-notes">${esc(d?.notes || '')}</textarea></div>
   `;
+}
+
+
+/* ---- billing area codes for the device form ----
+ * One area code belongs to one NAP box, and it is what billing uses to text the
+ * subscribers on that box. Fetched once and reused; typing a new code is always
+ * allowed so an area billing has not caught up with never blocks saving a box. */
+let AREA_OPTIONS = null;      // null = not loaded yet
+
+async function loadAreaOptions() {
+  if (AREA_OPTIONS) return AREA_OPTIONS;
+  try {
+    const r = await fetch('/api/billing-areas');
+    const d = await r.json();
+    AREA_OPTIONS = d.configured === false
+      ? { off: true, areas: [] }
+      : { off: false, areas: d.areas || [], error: d.error || null };
+  } catch (e) {
+    AREA_OPTIONS = { off: false, areas: [], error: 'cannot reach the map server' };
+  }
+  return AREA_OPTIONS;
+}
+
+async function fillAreaOptions(currentDeviceId) {
+  const list = document.getElementById('d-area-options');
+  const hint = document.getElementById('d-area-hint');
+  if (!list || !hint) return;
+  const opts = await loadAreaOptions();
+  if (!document.getElementById('d-area-options')) return;   // dialog closed meanwhile
+
+  if (opts.off) {
+    list.innerHTML = '';
+    hint.textContent = 'Billing is not connected, so type the area code by hand.';
+    return;
+  }
+  if (opts.error) {
+    list.innerHTML = '';
+    hint.textContent = `Could not load area codes (${opts.error}) — type it by hand.`;
+    return;
+  }
+  /* Codes already used by another box are still listed, but flagged on pick,
+     because one area code is meant to map to exactly one NAP. */
+  AREA_TAKEN = new Map();
+  for (const dev of (state.net.devices || [])) {
+    const a = String(dev.area || '').trim();
+    if (a && dev.id !== currentDeviceId) AREA_TAKEN.set(a.toLowerCase(), dev.name);
+  }
+  list.innerHTML = opts.areas.map((a) => {
+    const label = `${a.customers} subscriber${a.customers === 1 ? '' : 's'}` +
+      (a.offline ? ` · ${a.offline} offline` : '');
+    return `<option value="${esc(a.area)}">${esc(label)}</option>`;
+  }).join('');
+  hint.textContent = opts.areas.length
+    ? `${opts.areas.length} area codes from billing — or type a new one.`
+    : 'Billing returned no area codes yet — type it by hand.';
+  areaPicked();
+}
+
+let AREA_TAKEN = new Map();
+
+/* Live feedback under the field: how many subscribers that code covers, and a
+   warning if another box already claims it. */
+function areaPicked() {
+  const input = document.getElementById('d-area');
+  const hint = document.getElementById('d-area-hint');
+  // With no list loaded there is nothing to check the typed code against, so
+  // leave the "could not load / not connected" message in place rather than
+  // claiming billing does not have the code.
+  if (!input || !hint || !AREA_OPTIONS || AREA_OPTIONS.off || AREA_OPTIONS.error) return;
+  const val = String(input.value || '').trim();
+  if (!val) {
+    hint.textContent = AREA_OPTIONS.areas.length
+      ? `${AREA_OPTIONS.areas.length} area codes from billing — or type a new one.`
+      : 'Billing returned no area codes yet — type it by hand.';
+    hint.style.color = '';
+    return;
+  }
+  const match = AREA_OPTIONS.areas.find((a) => a.area.toLowerCase() === val.toLowerCase());
+  const clash = AREA_TAKEN.get(val.toLowerCase());
+  if (clash) {
+    hint.textContent = `⚠ "${val}" is already on ${clash}. One area code should belong to one box.`;
+    hint.style.color = '#fca5a5';
+    return;
+  }
+  hint.style.color = '';
+  hint.textContent = match
+    ? `${match.customers} subscriber${match.customers === 1 ? '' : 's'} on this code in billing` +
+      (match.offline ? ` · ${match.offline} currently offline` : '')
+    : `"${val}" is not in billing yet — it will be saved as typed.`;
 }
 
 /** A closure is configured by core count alone; everything else has two counts. */
@@ -1319,6 +1412,7 @@ function openNewDeviceModal(type, latlng) {
         $('#d-inputs').value = m.defaultIn;
         applyTypeToDeviceForm(e.target.value);
       });
+      fillAreaOptions(null);
     },
     onConfirm: async () => {
       const body = { ...readDeviceForm(), lat: latlng.lat, lng: latlng.lng };
@@ -1338,6 +1432,7 @@ function openEditDeviceModal(d) {
     body: deviceFormHtml(d),
     afterOpen: () => {
       $('#d-type').addEventListener('change', (e) => applyTypeToDeviceForm(e.target.value));
+      fillAreaOptions(d.id);
     },
     onConfirm: async () => {
       const body = readDeviceForm();
