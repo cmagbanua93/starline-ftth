@@ -3,6 +3,13 @@ const { query, withTx, FIBER_COLORS } = require('./db');
 const graph = require('./graph');
 const backups = require('./backups');
 
+/* ---- billing area codes, read from the monitor ----
+ * The monitor already syncs the billing export, so it is the one place that
+ * knows which area codes exist and how many subscribers sit on each. Unset
+ * simply means the Area picker on the map falls back to free text. */
+const MONITOR_URL = (process.env.MONITOR_URL || '').replace(/\/$/, '');
+const MONITOR_TOKEN = process.env.MONITOR_TOKEN || '';
+
 const router = express.Router();
 
 const DEVICE_TYPES = ['OLT', 'NAP', 'SPLITTER', 'JOINT'];
@@ -874,6 +881,35 @@ router.post('/installations', async (req, res, next) => {
       return res.status(409).json({ error: 'that PPPoE username is already on the map' });
     }
     next(e);
+  }
+});
+
+/* Feeds the Area dropdown on the device form. Counts only — no subscriber
+   details cross this boundary, because a dropdown does not need them. */
+router.get('/billing-areas', async (req, res) => {
+  if (!MONITOR_URL || !MONITOR_TOKEN) {
+    return res.json({ configured: false, areas: [], naps: [] });
+  }
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 8000);
+  try {
+    const r = await fetch(MONITOR_URL + '/api/naps', {
+      headers: { 'x-api-key': MONITOR_TOKEN },
+      signal: ctl.signal,
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      return res.status(502).json({ configured: true, error: out.error || ('monitor returned HTTP ' + r.status), areas: [], naps: [] });
+    }
+    res.json({ configured: true, areas: out.areas || [], naps: out.naps || [], meta: out.meta || null });
+  } catch (e) {
+    res.status(502).json({
+      configured: true,
+      error: e.name === 'AbortError' ? 'the monitor did not answer in time' : 'cannot reach the monitor',
+      areas: [], naps: [],
+    });
+  } finally {
+    clearTimeout(timer);
   }
 });
 
