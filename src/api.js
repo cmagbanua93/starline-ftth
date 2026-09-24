@@ -835,6 +835,116 @@ router.post('/ports/:id/release', async (req, res, next) => {
  * one transaction. Idempotent by ticket id, so the ticketing system can retry a
  * failed call for as long as it takes without risking a duplicate.
  */
+/* ---- a NAP box installed in the field ----
+ *
+ * The technician's job already records everything the map needs: where the box
+ * is, how big it is, which existing box feeds it and from which port. This
+ * turns that into a real device with real ports, connected to the network,
+ * so the next subscriber install can pick a port on it and an outage trace
+ * knows what sits behind it.
+ *
+ * Idempotent on the ticket. Reopening and re-completing a job must never plant
+ * a second box on the same post, so the first thing this does is look for the
+ * box that job already created.
+ */
+router.post('/nap-installs', async (req, res, next) => {
+  try {
+    const b = req.body || {};
+    const ticketId = clean(b.ticketId);
+    if (!ticketId) return bad(res, 'ticketId required');
+    const nap = b.nap || {};
+    const name = clean(nap.name);
+    if (!name) return bad(res, 'the new box needs a name');
+    const lat = asNum(nap.lat);
+    const lng = asNum(nap.lng);
+    if (lat === null || lng === null) return bad(res, 'the new box needs GPS coordinates');
+
+    /* Already done? Return what is there rather than doing it twice. */
+    const existing = await query('SELECT * FROM devices WHERE installed_by_ticket = $1', [ticketId]);
+    if (existing.rowCount) {
+      const dev = existing.rows[0];
+      const ports = await query(
+        'SELECT * FROM ports WHERE device_id = $1 ORDER BY port_kind, port_no', [dev.id]
+      );
+      const link = await query(
+        `SELECT l.* FROM links l JOIN ports p ON p.id = l.to_port_id
+         WHERE p.device_id = $1 AND p.port_kind = 'in' LIMIT 1`, [dev.id]
+      );
+      return res.status(200).json({
+        created: false, device: dev, ports: ports.rows, link: link.rows[0] || null,
+        note: 'this job already placed its box on the map',
+      });
+    }
+
+    /* 4, 8, 12 or 16 — whatever the technician chose. Anything else is a typo
+       rather than a box, so it is rejected instead of creating a wrong device. */
+    const portCount = parseInt(nap.port_count, 10);
+    if (![4, 8, 12, 16].includes(portCount)) {
+      return bad(res, 'box size must be 4, 8, 12 or 16 ports');
+    }
+    const status = DEVICE_STATUS.includes(nap.status) ? nap.status : 'active';
+
+    const feeder = b.feeder || {};
+    const fromPortId = clean(feeder.from_port_id);
+    if (fromPortId) {
+      /* Check the parent port before creating anything, so a taken port does not
+         leave a stranded box behind. */
+      const fp = await query('SELECT * FROM ports WHERE id = $1', [fromPortId]);
+      if (!fp.rowCount) return bad(res, 'the port on the feeding box was not found');
+      const busy = await query(
+        'SELECT 1 FROM links WHERE from_port_id = $1 OR to_port_id = $1', [fromPortId]
+      );
+      if (busy.rowCount) return bad(res, 'that port on the feeding box is already connected to something else');
+    }
+
+    const out = await withTx(async (client) => {
+      const r = await client.query(
+        `INSERT INTO devices (type, name, lat, lng, model, status, port_count, input_count,
+                              port_labeling, splitter_ratio, area, address, notes, installed_by_ticket)
+         VALUES ('NAP',$1,$2,$3,$4,$5,$6,1,'number',$7,$8,$9,$10,$11) RETURNING *`,
+        [
+          name, lat, lng, clean(nap.model), status, portCount,
+          '1:' + portCount,            // a 4-port cassette is a 1:4, and so on
+          clean(nap.area) || name,     // the box name and the billing area are one value
+          clean(nap.address), clean(nap.notes), ticketId,
+        ]
+      );
+      const device = r.rows[0];
+      await syncPorts(client, device.id, portCount, 1, 'NAP');
+
+      let link = null;
+      if (fromPortId) {
+        const feedIn = await client.query(
+          `SELECT id FROM ports WHERE device_id = $1 AND port_kind = 'in' ORDER BY port_no LIMIT 1`,
+          [device.id]
+        );
+        if (feedIn.rowCount) {
+          const lr = await client.query(
+            `INSERT INTO links (from_port_id, to_port_id, cable_length_m, fiber_core, cable_type, status, notes)
+             VALUES ($1,$2,$3,$4,$5,'active',$6) RETURNING *`,
+            [
+              fromPortId, feedIn.rows[0].id,
+              asNum(feeder.cable_length_m), clean(feeder.fiber_color),
+              clean(feeder.cable_type), 'Run recorded on the NAP installation job',
+            ]
+          );
+          link = lr.rows[0];
+          await client.query(`UPDATE ports SET status = 'used' WHERE id = ANY($1::uuid[])`,
+            [[fromPortId, feedIn.rows[0].id]]);
+        }
+      }
+      return { device, link };
+    });
+
+    const ports = await query(
+      'SELECT * FROM ports WHERE device_id = $1 ORDER BY port_kind, port_no', [out.device.id]
+    );
+    res.status(201).json({ created: true, device: out.device, ports: ports.rows, link: out.link });
+  } catch (e) {
+    next(e);
+  }
+});
+
 router.post('/installations', async (req, res, next) => {
   const b = req.body || {};
   const ticketId = clean(b.ticketId);
