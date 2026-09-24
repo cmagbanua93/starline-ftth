@@ -81,6 +81,12 @@ ALTER TABLE devices ADD COLUMN IF NOT EXISTS input_count integer NOT NULL DEFAUL
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS port_labeling text NOT NULL DEFAULT 'number';
 ALTER TABLE ports   ADD COLUMN IF NOT EXISTS port_kind text NOT NULL DEFAULT 'out';
 ALTER TABLE ports   ADD COLUMN IF NOT EXISTS fiber_color text;
+/* Which NAP-install job planted this box. A completed job that is reopened and
+   completed again must find its box already here rather than plant a second one
+   on the same post. */
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS installed_by_ticket text;
+CREATE UNIQUE INDEX IF NOT EXISTS devices_installed_by_ticket_idx
+  ON devices(installed_by_ticket) WHERE installed_by_ticket IS NOT NULL;
 
 DO $$ BEGIN
   ALTER TABLE devices ADD CONSTRAINT devices_labeling_chk
