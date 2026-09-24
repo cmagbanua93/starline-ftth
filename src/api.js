@@ -877,9 +877,20 @@ router.post('/nap-installs', async (req, res, next) => {
     }
 
     /* 4, 8, 12 or 16 — whatever the technician chose. Anything else is a typo
-       rather than a box, so it is rejected instead of creating a wrong device. */
-    const portCount = parseInt(nap.port_count, 10);
-    if (![4, 8, 12, 16].includes(portCount)) {
+       rather than a box, so it is rejected instead of creating a wrong device.
+
+       Zero is the exception, and it means "size not recorded". Jobs finished
+       before the box-size field existed still know where the box is and what it
+       is called, and a box on the map at the right pole is worth far more than
+       no box at all. It is deliberately created with no output ports rather
+       than a guessed eight: invented ports would be offered to technicians by
+       the subscriber port picker, and someone would hang a customer off a port
+       that does not exist. With none, the box simply reads as having no
+       capacity until its real size is set here. */
+    const portCount = nap.port_count === undefined || nap.port_count === null || nap.port_count === ''
+      ? 0
+      : parseInt(nap.port_count, 10);
+    if (![0, 4, 8, 12, 16].includes(portCount)) {
       return bad(res, 'box size must be 4, 8, 12 or 16 ports');
     }
     const status = DEVICE_STATUS.includes(nap.status) ? nap.status : 'active';
@@ -904,7 +915,7 @@ router.post('/nap-installs', async (req, res, next) => {
          VALUES ('NAP',$1,$2,$3,$4,$5,$6,1,'number',$7,$8,$9,$10,$11) RETURNING *`,
         [
           name, lat, lng, clean(nap.model), status, portCount,
-          '1:' + portCount,            // a 4-port cassette is a 1:4, and so on
+          portCount ? '1:' + portCount : '',   // a 4-port cassette is a 1:4; blank when unknown
           clean(nap.area) || name,     // the box name and the billing area are one value
           clean(nap.address), clean(nap.notes), ticketId,
         ]
