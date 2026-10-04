@@ -847,6 +847,34 @@ router.post('/ports/:id/release', async (req, res, next) => {
  * a second box on the same post, so the first thing this does is look for the
  * box that job already created.
  */
+/* Distance in metres between two GPS points. */
+function metresBetween(aLat, aLng, bLat, bLng) {
+  const R = 6371000, rad = (d) => (d * Math.PI) / 180;
+  const dLat = rad(bLat - aLat), dLng = rad(bLng - aLng);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(aLat)) * Math.cos(rad(bLat)) * Math.sin(dLng / 2) ** 2;
+  return Math.round(2 * R * Math.asin(Math.sqrt(h)));
+}
+
+/* ---- planned boxes, for the technician's map in the ticketing app ----
+ * The office names and pins a box as "planned" on this map; the technician picks
+ * it on site instead of inventing a name. Existing boxes come along so the
+ * technician can see the neighbourhood. */
+router.get('/planned-naps', async (req, res, next) => {
+  try {
+    const planned = await query(
+      `SELECT id, name, lat, lng, area, address, notes, port_count FROM devices
+       WHERE type = 'NAP' AND status = 'planned' AND installed_by_ticket IS NULL ORDER BY name`
+    );
+    const existing = await query(
+      `SELECT id, type, name, lat, lng, status FROM devices
+       WHERE NOT (type = 'NAP' AND status = 'planned' AND installed_by_ticket IS NULL) ORDER BY name`
+    );
+    res.json({ planned: planned.rows, existing: existing.rows });
+  } catch (e) {
+    next(e);
+  }
+});
+
 router.post('/nap-installs', async (req, res, next) => {
   try {
     const b = req.body || {};
@@ -906,6 +934,61 @@ router.post('/nap-installs', async (req, res, next) => {
         'SELECT 1 FROM links WHERE from_port_id = $1 OR to_port_id = $1', [fromPortId]
       );
       if (busy.rowCount) return bad(res, 'that port on the feeding box is already connected to something else');
+    }
+
+    /* ---- the box was planned on the map: finish THAT box, don't create another ----
+       Its name is the office's, not whatever was typed in the field. Its pin moves
+       to the technician's GPS, because the post that was actually used is the truth. */
+    const plannedId = clean(b.plannedId);
+    if (plannedId) {
+      const out = await withTx(async (client) => {
+        const pr = await client.query('SELECT * FROM devices WHERE id = $1 FOR UPDATE', [plannedId]);
+        if (!pr.rowCount) { const e = new Error('the planned box was not found on the map — it may have been deleted'); e.status = 400; throw e; }
+        const pd = pr.rows[0];
+        if (pd.type !== 'NAP') { const e = new Error('the chosen item on the map is not a NAP box'); e.status = 400; throw e; }
+        if (pd.installed_by_ticket && pd.installed_by_ticket !== ticketId) {
+          const e = new Error(`${pd.name} was already installed by another job`); e.status = 400; throw e;
+        }
+        if (pd.status !== 'planned' && !pd.installed_by_ticket) {
+          const e = new Error(`${pd.name} is not a planned box (status: ${pd.status})`); e.status = 400; throw e;
+        }
+        const moved = metresBetween(pd.lat, pd.lng, lat, lng);
+        const note = [pd.notes, nap.notes, `Planned at ${pd.lat.toFixed(6)},${pd.lng.toFixed(6)} — moved ${moved} m to the actual post`]
+          .filter(Boolean).join(' · ');
+        const r = await client.query(
+          `UPDATE devices SET lat = $2, lng = $3, status = $4, model = COALESCE($5, model),
+             port_count = CASE WHEN $6::int > 0 THEN $6::int ELSE port_count END,
+             splitter_ratio = CASE WHEN $6::int > 0 THEN '1:' || $6::int ELSE splitter_ratio END,
+             area = COALESCE(NULLIF(area, ''), name), address = COALESCE($7, address), notes = $8,
+             installed_by_ticket = $1, updated_at = now()
+           WHERE id = $9 RETURNING *`,
+          [ticketId, lat, lng, status, clean(nap.model), portCount, clean(nap.address), note, plannedId]
+        );
+        const device = r.rows[0];
+        await syncPorts(client, device.id, device.port_count, 1, 'NAP');
+        let link = null;
+        if (fromPortId) {
+          const feedIn = await client.query(
+            `SELECT id FROM ports WHERE device_id = $1 AND port_kind = 'in' ORDER BY port_no LIMIT 1`, [device.id]
+          );
+          const taken = feedIn.rowCount
+            ? await client.query('SELECT 1 FROM links WHERE to_port_id = $1', [feedIn.rows[0].id]) : { rowCount: 1 };
+          if (feedIn.rowCount && !taken.rowCount) {
+            const lr = await client.query(
+              `INSERT INTO links (from_port_id, to_port_id, cable_length_m, fiber_core, cable_type, status, notes)
+               VALUES ($1,$2,$3,$4,$5,'active',$6) RETURNING *`,
+              [fromPortId, feedIn.rows[0].id, asNum(feeder.cable_length_m), clean(feeder.fiber_color),
+               clean(feeder.cable_type), 'Run recorded on the NAP installation job']
+            );
+            link = lr.rows[0];
+            await client.query(`UPDATE ports SET status = 'used' WHERE id = ANY($1::uuid[])`, [[fromPortId, feedIn.rows[0].id]]);
+          }
+        }
+        return { device, link, moved };
+      }).catch((e) => { if (e.status === 400) { res.status(400).json({ error: e.message }); return null; } throw e; });
+      if (!out) return;
+      const ports = await query('SELECT * FROM ports WHERE device_id = $1 ORDER BY port_kind, port_no', [out.device.id]);
+      return res.status(200).json({ created: false, planned: true, movedMeters: out.moved, device: out.device, ports: ports.rows, link: out.link });
     }
 
     const out = await withTx(async (client) => {
