@@ -1215,7 +1215,7 @@ function openModal({ title, body, confirm: confirmLabel = 'Save', onConfirm, aft
   $('#modal-cancel').onclick = closeModal;
   $('#modal-ok').onclick = async () => {
     try {
-      await modalConfirm?.();
+      if ((await modalConfirm?.()) === false) return;   // the handler chose to keep the form open
       closeModal();
     } catch (e) { toast(e.message, 'error'); }
   };
@@ -1258,6 +1258,10 @@ function deviceFormHtml(d, type) {
       <input id="d-name" value="${esc(d?.name || '')}" placeholder="${t === 'OLT' ? 'e.g. OLT-Poblacion' : t === 'NAP' ? 'e.g. TUNGKIL-LCP1-SUB1-NAP2' : 'e.g. SPL-Calajoan-01'}"
         oninput="napNameHint(true)" />
       <div id="d-name-hint" class="muted" style="font-size:12px;margin-top:4px">${t === 'NAP' ? napNameHintHtml(d?.name || '') : ''}</div></div>
+    ${d ? `<div class="field"><label>Coordinates (latitude, longitude)</label>
+      <input id="d-coords" value="${Number(d.lat).toFixed(6)}, ${Number(d.lng).toFixed(6)}" placeholder="e.g. 10.237081, 123.788435" oninput="coordsHint(${Number(d.lat)}, ${Number(d.lng)})" />
+      <p class="hint" id="d-coords-hint">Paste the correct position — e.g. copied from Google Maps (press and hold on the spot, then copy the numbers). You can also drag the pin on the map.
+        <a href="https://www.google.com/maps?q=${Number(d.lat)},${Number(d.lng)}" target="_blank" rel="noopener">Open current position in Google Maps</a></p></div>` : ''}
     <div class="field-row">
       <div class="field"><label>Type</label>
         <select id="d-type">
@@ -1404,8 +1408,33 @@ function applyTypeToDeviceForm(type) {
     : 'A 1:8 NAP is 1 feeder in + 8 out. Use 2 feeder-ins for a loop-through closure fed from both directions.';
 }
 
+/* "10.237081, 123.788435" (or with a space / semicolon, or a Google Maps link) -> {lat,lng} */
+function parseCoords(text) {
+  const nums = String(text || '').match(/-?\d{1,3}\.\d+/g);
+  if (!nums || nums.length < 2) return null;
+  const lat = parseFloat(nums[0]), lng = parseFloat(nums[1]);
+  if (!(lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180)) return null;
+  return { lat, lng };
+}
+function metresApart(a, b) {
+  const R = 6371000, toR = (x) => x * Math.PI / 180;
+  const dLat = toR(b.lat - a.lat), dLng = toR(b.lng - a.lng);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(toR(a.lat)) * Math.cos(toR(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return Math.round(2 * R * Math.asin(Math.sqrt(h)));
+}
+function coordsHint(lat0, lng0) {
+  const el = document.getElementById('d-coords-hint'), c = parseCoords(document.getElementById('d-coords').value);
+  if (!el) return;
+  if (!c) { el.textContent = 'Enter two numbers: latitude, longitude (e.g. 10.237081, 123.788435)'; return; }
+  const m = metresApart({ lat: lat0, lng: lng0 }, c);
+  el.textContent = m ? `The pin will move ${m} m to ${c.lat.toFixed(6)}, ${c.lng.toFixed(6)}.` : 'Same position as now.';
+}
 function readDeviceForm() {
+  const coordsEl = document.getElementById('d-coords');
+  const coords = coordsEl ? parseCoords(coordsEl.value) : null;
+  if (coordsEl && coordsEl.value.trim() && !coords) throw new Error('Coordinates must be two numbers: latitude, longitude (e.g. 10.237081, 123.788435)');
   return {
+    ...(coords ? { lat: coords.lat, lng: coords.lng } : {}),
     name: $('#d-name').value,
     type: $('#d-type').value,
     status: $('#d-status').value,
@@ -1460,9 +1489,12 @@ function openEditDeviceModal(d) {
     onConfirm: async () => {
       const body = readDeviceForm();
       if (!body.name.trim()) throw new Error('Give the device a name');
+      const moved = body.lat !== undefined ? metresApart({ lat: d.lat, lng: d.lng }, body) : 0;
+      if (moved > 500 && !confirm(`This moves ${d.name} ${moved} m. Is that right?`)) return false;
       await api(`/devices/${d.id}`, { method: 'PATCH', body });
       await refresh();
-      toast('Saved', 'ok');
+      if (moved) map.panTo([body.lat, body.lng]);
+      toast(moved ? `Saved — pin moved ${moved} m` : 'Saved', 'ok');
     },
   });
 }
