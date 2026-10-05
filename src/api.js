@@ -855,6 +855,105 @@ function metresBetween(aLat, aLng, bLat, bLng) {
   return Math.round(2 * R * Math.asin(Math.sqrt(h)));
 }
 
+/* ---- Sub-main boxes: a 4-port cassette with a second (usually 8-port) cassette
+ * whose input pigtail plugs into port 1 of the 4-port, inside the same box.
+ * The second cassette is its own device (so subscribers get its ports), placed at
+ * the same pole and filed under the same billing area. Ports 2-4 of the 4-port stay
+ * free to feed the next NAP boxes. */
+async function addCompanionCassette(client, main, secondaryPorts, ticketId) {
+  const compTicket = ticketId + ':cassette2';
+  const already = await client.query('SELECT * FROM devices WHERE installed_by_ticket = $1', [compTicket]);
+  if (already.rowCount) return { device: already.rows[0], link: null };
+  /* Naming convention: a box fed from port N of another box is "<feeding box>-NAP<N>",
+     so the cassette on port 1 of TUNGKIL-LCP1-SUB1 is TUNGKIL-LCP1-SUB1-NAP1.
+     It is its own billing area (subscribers on it are filed under that name). */
+  const compName = `${main.name}-NAP1`;
+  const notes = `${secondaryPorts}-port cassette inside ${main.name}, fed from its port 1`;
+  const lat = main.lat, lng = main.lng + 0.000012;   // ~1 m east so the two pins don't sit exactly on top of each other
+  const same = await client.query(`SELECT * FROM devices WHERE upper(name) = upper($1) LIMIT 1`, [compName]);
+  let r;
+  if (same.rowCount && same.rows[0].status === 'planned') {
+    /* The office already planned it as its own pin: finish that one instead of planting a second. */
+    r = await client.query(
+      `UPDATE devices SET lat = $2, lng = $3, status = 'active', port_count = $4, input_count = 1, splitter_ratio = $5,
+         area = $6, address = COALESCE(address, $7), notes = concat_ws(' · ', NULLIF(notes, ''), $8::text),
+         installed_by_ticket = $9, updated_at = now() WHERE id = $1 RETURNING *`,
+      [same.rows[0].id, lat, lng, secondaryPorts, '1:' + secondaryPorts, compName, main.address, notes, compTicket]
+    );
+  } else {
+    const name = same.rowCount ? `${compName} (${main.name} cassette 2)` : compName;   // never two boxes with one name
+    r = await client.query(
+      `INSERT INTO devices (type, name, lat, lng, status, port_count, input_count, port_labeling, splitter_ratio,
+                            area, address, notes, installed_by_ticket)
+       VALUES ('NAP',$1,$2,$3,'active',$4,1,'number',$5,$6,$7,$8,$9) RETURNING *`,
+      [name, lat, lng, secondaryPorts, '1:' + secondaryPorts, name, main.address, notes, compTicket]
+    );
+  }
+  const comp = r.rows[0];
+  await syncPorts(client, comp.id, secondaryPorts, 1, 'NAP');
+  const p1 = await client.query(`SELECT id FROM ports WHERE device_id = $1 AND port_kind = 'out' AND port_no = 1`, [main.id]);
+  const cin = await client.query(`SELECT id FROM ports WHERE device_id = $1 AND port_kind = 'in' ORDER BY port_no LIMIT 1`, [comp.id]);
+  let link = null;
+  if (p1.rowCount && cin.rowCount) {
+    const busy = await client.query('SELECT 1 FROM links WHERE from_port_id = $1 OR to_port_id = $1', [p1.rows[0].id]);
+    if (!busy.rowCount) {
+      const lr = await client.query(
+        `INSERT INTO links (from_port_id, to_port_id, cable_length_m, cable_type, status, notes)
+         VALUES ($1,$2,0,'pigtail','active',$3) RETURNING *`,
+        [p1.rows[0].id, cin.rows[0].id, 'Inside the box: second cassette on port 1']
+      );
+      link = lr.rows[0];
+      await client.query(`UPDATE ports SET status = 'used' WHERE id = ANY($1::uuid[])`, [[p1.rows[0].id, cin.rows[0].id]]);
+    }
+  }
+  return { device: comp, link };
+}
+
+/* ---- box naming (billing's Areas page renames boxes and their subscribers in one go) ----
+ * AREA-LCPk / AREA-LCPk-SUBp / AREA-LCPk-SUBp-NAPn / AREA-LCPk-NAPn — the SUB and NAP
+ * numbers are the port of the box it is fed from, so the name can be suggested from the map. */
+const NAP_NAME_RE = /^[A-Z0-9]+-LCP\d{1,2}(-SUB\d{1,2}(-NAP\d{1,2})?|-NAP\d{1,2})?$/;
+router.get('/naming', async (req, res, next) => {
+  try {
+    const r = await query(
+      `SELECT d.id, d.name, d.area, d.status, d.port_count,
+              f.name AS feeder_name, fp.port_no AS feeder_port
+         FROM devices d
+         LEFT JOIN LATERAL (
+           SELECT l.from_port_id FROM ports ip JOIN links l ON l.to_port_id = ip.id
+            WHERE ip.device_id = d.id AND ip.port_kind = 'in' ORDER BY ip.port_no LIMIT 1) li ON true
+         LEFT JOIN ports fp ON fp.id = li.from_port_id
+         LEFT JOIN devices f ON f.id = fp.device_id
+        WHERE d.type = 'NAP'
+        ORDER BY d.name`);
+    const boxes = r.rows.map((b) => {
+      let suggested = '';
+      const fn = String(b.feeder_name || '').toUpperCase();
+      if (b.feeder_port && NAP_NAME_RE.test(fn)) {
+        if (/-LCP\d+$/.test(fn)) suggested = fn + (Number(b.port_count) === 4 ? '-SUB' : '-NAP') + b.feeder_port;
+        else if (/-SUB\d+$/.test(fn)) suggested = fn + '-NAP' + b.feeder_port;
+      }
+      return { id: b.id, name: b.name, area: b.area, status: b.status, port_count: b.port_count,
+        feeder: b.feeder_name ? { name: b.feeder_name, port_no: b.feeder_port } : null, suggested };
+    });
+    res.json({ boxes });
+  } catch (e) { next(e); }
+});
+router.post('/naming/rename', async (req, res, next) => {
+  try {
+    const from = clean((req.body || {}).from), to = clean((req.body || {}).to);
+    if (!from || !to) return bad(res, 'from and to required');
+    const r = await query(
+      `UPDATE devices
+          SET name = CASE WHEN lower(name) = lower($1) THEN $2 ELSE name END,
+              area = CASE WHEN lower(coalesce(area, '')) = lower($1) OR lower(name) = lower($1) THEN $2 ELSE area END,
+              updated_at = now()
+        WHERE type = 'NAP' AND (lower(name) = lower($1) OR lower(coalesce(area, '')) = lower($1))
+        RETURNING id, name`, [from, to]);
+    res.json({ renamed: r.rowCount, devices: r.rows });
+  } catch (e) { next(e); }
+});
+
 /* ---- planned boxes, for the technician's map in the ticketing app ----
  * The office names and pins a box as "planned" on this map; the technician picks
  * it on site instead of inventing a name. Existing boxes come along so the
@@ -922,6 +1021,10 @@ router.post('/nap-installs', async (req, res, next) => {
       return bad(res, 'box size must be 4, 8, 12 or 16 ports');
     }
     const status = DEVICE_STATUS.includes(nap.status) ? nap.status : 'active';
+    const combo = b.combo || nap.combo || null;
+    const secondaryPorts = combo ? parseInt(combo.secondary_ports, 10) : 0;
+    if (combo && ![4, 8, 12, 16].includes(secondaryPorts)) return bad(res, 'the second cassette must be 4, 8, 12 or 16 ports');
+    if (combo && portCount !== 0 && portCount < 2) return bad(res, 'a sub-main box needs at least 2 ports on its first cassette');
 
     const feeder = b.feeder || {};
     const fromPortId = clean(feeder.from_port_id);
@@ -984,11 +1087,13 @@ router.post('/nap-installs', async (req, res, next) => {
             await client.query(`UPDATE ports SET status = 'used' WHERE id = ANY($1::uuid[])`, [[fromPortId, feedIn.rows[0].id]]);
           }
         }
-        return { device, link, moved };
+        const companion = secondaryPorts ? await addCompanionCassette(client, device, secondaryPorts, ticketId) : null;
+        return { device, link, moved, companion };
       }).catch((e) => { if (e.status === 400) { res.status(400).json({ error: e.message }); return null; } throw e; });
       if (!out) return;
       const ports = await query('SELECT * FROM ports WHERE device_id = $1 ORDER BY port_kind, port_no', [out.device.id]);
-      return res.status(200).json({ created: false, planned: true, movedMeters: out.moved, device: out.device, ports: ports.rows, link: out.link });
+      return res.status(200).json({ created: false, planned: true, movedMeters: out.moved, device: out.device, ports: ports.rows, link: out.link,
+        companion: out.companion ? out.companion.device : null });
     }
 
     const out = await withTx(async (client) => {
@@ -1027,13 +1132,15 @@ router.post('/nap-installs', async (req, res, next) => {
             [[fromPortId, feedIn.rows[0].id]]);
         }
       }
-      return { device, link };
+      const companion = secondaryPorts ? await addCompanionCassette(client, device, secondaryPorts, ticketId) : null;
+      return { device, link, companion };
     });
 
     const ports = await query(
       'SELECT * FROM ports WHERE device_id = $1 ORDER BY port_kind, port_no', [out.device.id]
     );
-    res.status(201).json({ created: true, device: out.device, ports: ports.rows, link: out.link });
+    res.status(201).json({ created: true, device: out.device, ports: ports.rows, link: out.link,
+      companion: out.companion ? out.companion.device : null });
   } catch (e) {
     next(e);
   }

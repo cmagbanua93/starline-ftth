@@ -1229,12 +1229,35 @@ function closeModal() {
   modalConfirm = null;
 }
 
+/* NAP naming convention (same rule as the ticketing app):
+ *   AREA-LCP<k>               main 4-port cassette on a PON (AREA = barangay/sitio code, no spaces; k = 1st, 2nd LCP in the area)
+ *   AREA-LCP<k>-SUB<p>        sub-main 4-port box on port p of that LCP
+ *   AREA-LCP<k>-SUB<p>-NAP<n> 8-port box on port n of that sub-main (NAP1 = the cassette inside the sub-main box)
+ *   AREA-LCP<k>-NAP<n>        8-port box fed straight from port n of the LCP */
+const NAP_NAME_RE = /^[A-Z0-9]+-LCP\d{1,2}(-SUB\d{1,2}(-NAP\d{1,2})?|-NAP\d{1,2})?$/;
+function napNameHintHtml(name) {
+  const n = String(name || '').trim();
+  if (!n) return 'Format: AREA-LCP1 · AREA-LCP1-SUB1 · AREA-LCP1-SUB1-NAP2 (SUB/NAP number = the port it is fed from). To rename a box that has subscribers, use Billing → Areas so billing follows.';
+  return NAP_NAME_RE.test(n) ? '✓ Follows the naming convention (renaming a box with subscribers? use Billing → Areas so billing follows)'
+    : '⚠ Not the standard format — use AREA-LCP1, AREA-LCP1-SUB1 or AREA-LCP1-SUB1-NAP2 (no spaces)';
+}
+function napNameHint(typing) {
+  const el = document.getElementById('d-name-hint'), ty = document.getElementById('d-type'), inp = document.getElementById('d-name');
+  if (typing && ty && ty.value === 'NAP' && inp) {          // NAP names: upper case, no spaces
+    const v = inp.value.toUpperCase().replace(/\s+/g, '');
+    if (v !== inp.value) inp.value = v;
+  }
+  if (el) el.textContent = ty && ty.value === 'NAP' ? napNameHintHtml(document.getElementById('d-name').value) : '';
+}
+
 function deviceFormHtml(d, type) {
   const t = d?.type || type;
   const meta = TYPE_META[t];
   return `
     <div class="field"><label>Name</label>
-      <input id="d-name" value="${esc(d?.name || '')}" placeholder="${t === 'OLT' ? 'e.g. OLT-Poblacion' : t === 'NAP' ? 'e.g. NAP-Tunghaan-03' : 'e.g. SPL-Calajoan-01'}" /></div>
+      <input id="d-name" value="${esc(d?.name || '')}" placeholder="${t === 'OLT' ? 'e.g. OLT-Poblacion' : t === 'NAP' ? 'e.g. TUNGKIL-LCP1-SUB1-NAP2' : 'e.g. SPL-Calajoan-01'}"
+        oninput="napNameHint(true)" />
+      <div id="d-name-hint" class="muted" style="font-size:12px;margin-top:4px">${t === 'NAP' ? napNameHintHtml(d?.name || '') : ''}</div></div>
     <div class="field-row">
       <div class="field"><label>Type</label>
         <select id="d-type">
