@@ -1195,6 +1195,42 @@ router.post('/installations', async (req, res, next) => {
   }
 });
 
+/* Adds a box's area code to billing's Area list (through the monitor), so the
+   first subscriber hung off a box placed by hand on the map is not refused by
+   billing. Called by the map right after a box is saved. Idempotent at the
+   billing end: an area billing already has is reported, not duplicated.
+   The billing area is the box's Area code, or its name when that is blank —
+   the same value the ticketing system files subscribers under. */
+const BILLING_AREA_TYPES = ['NAP', 'SPLITTER'];
+router.post('/billing-areas/register', async (req, res, next) => {
+  try {
+    const id = String((req.body || {}).deviceId || '');
+    const r0 = await query('SELECT id, type, name, area, status FROM devices WHERE id = $1', [id]);
+    if (!r0.rowCount) return res.status(404).json({ error: 'device not found' });
+    const d = r0.rows[0];
+    const area = clean(d.area) || clean(d.name);
+    if (!BILLING_AREA_TYPES.includes(d.type) || !area) return res.json({ ok: true, skipped: 'not a NAP box' });
+    if (d.status === 'planned') return res.json({ ok: true, skipped: 'planned' });   // added once it is built
+    if (!MONITOR_URL || !MONITOR_TOKEN) return res.json({ ok: false, off: true, error: 'billing is not connected to the map' });
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 45000);
+    try {
+      const r = await fetch(MONITOR_URL + '/api/billing-area', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': MONITOR_TOKEN },
+        body: JSON.stringify({ area }),
+        signal: ctl.signal,
+      });
+      const out = await r.json().catch(() => ({}));
+      if (!(r.ok && out.ok)) return res.status(502).json({ ok: false, area, error: out.error || ('billing returned HTTP ' + r.status) });
+      console.log(`[area] ${d.name}: "${out.area || area}" ${out.created ? 'added to' : 'already in'} billing`);
+      res.json({ ok: true, area: out.area || area, created: !!out.created });
+    } catch (e) {
+      res.status(502).json({ ok: false, area, error: e.name === 'AbortError' ? 'billing did not answer in time' : 'cannot reach the monitor' });
+    } finally { clearTimeout(timer); }
+  } catch (e) { next(e); }
+});
+
 /* Feeds the Area dropdown on the device form. Counts only — no subscriber
    details cross this boundary, because a dropdown does not need them. */
 router.get('/billing-areas', async (req, res) => {

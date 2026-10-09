@@ -71,6 +71,11 @@ app.use('/api', (req, res, next) => {
   res.status(401).json({ error: 'Not signed in' });
 });
 
+/* Map backgrounds. GOOGLE_MAPS_KEY is a browser key for Google's Map Tiles API —
+   restrict it in Google Cloud to this site's address and to the Map Tiles API only.
+   Without it the map keeps using OpenStreetMap / Esri. */
+app.get('/api/map-config', (req, res) => res.json({ googleMapsKey: process.env.GOOGLE_MAPS_KEY || '' }));
+
 app.use('/api', api);
 
 /* ---------------------------- static ------------------------------- */

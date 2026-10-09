@@ -70,7 +70,7 @@ function toast(msg, kind) {
   el.className = 'toast' + (kind ? ' ' + kind : '');
   el.hidden = false;
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => { el.hidden = true; }, 3200);
+  toast._t = setTimeout(() => { el.hidden = true; }, kind === 'error' ? 8000 : 3200);
 }
 
 async function api(path, options = {}) {
@@ -122,14 +122,11 @@ function initMap() {
   );
   layers.hybrid = L.layerGroup([layers.satellite, layers.labels]);
 
+  const bases = { 'Street map': layers.street, Satellite: layers.satellite, 'Satellite + labels': layers.hybrid };
+  layers.control = L.control.layers(bases, {}, { position: 'topright' }).addTo(map);
   layers.street.addTo(map);
-  L.control
-    .layers(
-      { 'Street map': layers.street, Satellite: layers.satellite, 'Satellite + labels': layers.hybrid },
-      {},
-      { position: 'topright' }
-    )
-    .addTo(map);
+  map.on('baselayerchange', (e) => { try { localStorage.setItem('ftth_base', e.name); } catch {} updateGoogleAttribution(); });
+  addGoogleLayers();   // adds Google Road / Satellite / Hybrid when a key is configured
 
   map.on('click', (e) => {
     if (state.mode && state.mode.kind === 'place') {
@@ -145,6 +142,84 @@ function initMap() {
     const wanted = map.getZoom() >= 14 && $('#toggle-labels').checked;
     if (wanted !== state.showLabels) { state.showLabels = wanted; renderMap(); }
   });
+}
+
+/* ---- Google Maps backgrounds (official Map Tiles API) ----
+ * A tile "session" is created per map type and reused until it expires (about two
+ * weeks), so opening the map does not cost a new session each time. Google's terms
+ * require its attribution on the map, so the copyright for the visible area is
+ * shown bottom-right while a Google layer is on. */
+const GOOGLE_TYPES = {
+  'Google Road':      { mapType: 'roadmap' },
+  'Google Satellite': { mapType: 'satellite' },
+  'Google Hybrid':    { mapType: 'satellite', layerTypes: ['layerRoadmap'] },
+};
+let googleKey = '', googleAttr = null, googleAttrTimer = null;
+async function googleSession(name, spec) {
+  const cacheKey = 'gmt_' + name.replace(/\s+/g, '_');
+  try {
+    const c = JSON.parse(localStorage.getItem(cacheKey) || 'null');
+    if (c && c.key === googleKey && Number(c.expiry) * 1000 > Date.now() + 3600e3) return c.session;
+  } catch {}
+  const r = await fetch('https://tile.googleapis.com/v1/createSession?key=' + encodeURIComponent(googleKey), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...spec, language: 'en-US', region: 'PH' }),
+  });
+  const out = await r.json().catch(() => ({}));
+  if (!r.ok || !out.session) throw new Error((out.error && out.error.message) || ('HTTP ' + r.status));
+  try { localStorage.setItem(cacheKey, JSON.stringify({ key: googleKey, session: out.session, expiry: out.expiry })); } catch {}
+  return out.session;
+}
+async function addGoogleLayers() {
+  try {
+    googleKey = (await api('/map-config')).googleMapsKey || '';
+  } catch { return; }
+  if (!googleKey) return;
+  let saved = null;
+  try { saved = localStorage.getItem('ftth_base'); } catch {}
+  for (const [name, spec] of Object.entries(GOOGLE_TYPES)) {
+    try {
+      const session = await googleSession(name, spec);
+      const layer = L.tileLayer(
+        `https://tile.googleapis.com/v1/2dtiles/{z}/{x}/{y}?session=${encodeURIComponent(session)}&key=${encodeURIComponent(googleKey)}`,
+        { maxZoom: 22, maxNativeZoom: 22 }
+      );
+      layer._googleSession = session;
+      layers[name] = layer;
+      layers.control.addBaseLayer(layer, name);
+    } catch (e) {
+      console.warn('[google maps]', name, e.message);
+      if (name === 'Google Road') { toast('Google Maps could not load: ' + e.message, 'error'); return; }
+    }
+  }
+  /* Google Road is the default unless the user last picked something else */
+  const pick = layers[saved] || layers['Google Road'];
+  if (pick) {
+    for (const l of [layers.street, layers.satellite, layers.hybrid]) if (map.hasLayer(l)) map.removeLayer(l);
+    pick.addTo(map);
+  }
+  map.on('moveend', () => { clearTimeout(googleAttrTimer); googleAttrTimer = setTimeout(updateGoogleAttribution, 800); });
+  updateGoogleAttribution();
+}
+function activeGoogleLayer() {
+  return Object.keys(GOOGLE_TYPES).map((n) => layers[n]).find((l) => l && map.hasLayer(l)) || null;
+}
+async function updateGoogleAttribution() {
+  const layer = activeGoogleLayer();
+  if (googleAttr) { map.attributionControl.removeAttribution(googleAttr); googleAttr = null; }
+  if (!layer) return;
+  const b = map.getBounds();
+  let text = 'Google';
+  try {
+    const q = new URLSearchParams({ session: layer._googleSession, key: googleKey, zoom: map.getZoom(),
+      north: b.getNorth(), south: b.getSouth(), east: b.getEast(), west: b.getWest() });
+    const r = await fetch('https://tile.googleapis.com/tile/v1/viewport?' + q);
+    const v = await r.json();
+    if (v && v.copyright) text = 'Map data ' + v.copyright;
+  } catch {}
+  if (activeGoogleLayer() !== layer) return;
+  googleAttr = `<span style="font-weight:600">Google</span> · ${esc(text)}`;
+  map.attributionControl.addAttribution(googleAttr);
 }
 
 function fitToNetwork() {
@@ -1364,6 +1439,28 @@ async function fillAreaOptions(currentDeviceId) {
 
 let AREA_TAKEN = new Map();
 
+/* After a NAP box is saved: if billing does not have its area code yet, add it,
+   so subscribers connected to this box can be sent to billing. Runs after the
+   save (billing can take a while to answer), and reports in a second toast. */
+async function registerBillingArea(dev) {
+  if (!dev || !['NAP', 'SPLITTER'].includes(dev.type) || dev.status === 'planned') return;
+  const area = String(dev.area || dev.name || '').trim();
+  if (!area) return;
+  const opts = AREA_OPTIONS || await loadAreaOptions();
+  if (opts.off) return;                                         // billing not linked to the map
+  if (!opts.error && opts.areas.some((a) => a.area.toLowerCase() === area.toLowerCase())) return;   // already there
+  toast(`Adding "${area}" to billing…`);
+  try {
+    const out = await api('/billing-areas/register', { method: 'POST', body: { deviceId: dev.id } });
+    if (out.skipped) return;
+    if (!out.ok) throw new Error(out.error || 'billing did not accept it');
+    if (out.created) toast(`"${out.area}" added to billing's Area list`, 'ok');
+    AREA_OPTIONS = null;                                        // reload the list next time
+  } catch (e) {
+    toast(`Could not add "${area}" to billing (${e.message}). It will be added when the first subscriber on it is sent from ticketing.`, 'error');
+  }
+}
+
 /* Live feedback under the field: how many subscribers that code covers, and a
    warning if another box already claims it. */
 function areaPicked() {
@@ -1392,7 +1489,7 @@ function areaPicked() {
   hint.textContent = match
     ? `${match.customers} subscriber${match.customers === 1 ? '' : 's'} on this code in billing` +
       (match.offline ? ` · ${match.offline} currently offline` : '')
-    : `"${val}" is not in billing yet — it will be saved as typed.`;
+    : `"${val}" is not in billing yet — it will be added to billing's Area list when you save.`;
 }
 
 /** A closure is configured by core count alone; everything else has two counts. */
@@ -1474,6 +1571,7 @@ function openNewDeviceModal(type, latlng) {
       await refresh({ keepSelection: false });
       openDevice(res.device.id, { silent: true });
       toast(`${TYPE_META[body.type].label} placed`, 'ok');
+      registerBillingArea(res.device);
     },
   });
 }
@@ -1491,8 +1589,9 @@ function openEditDeviceModal(d) {
       if (!body.name.trim()) throw new Error('Give the device a name');
       const moved = body.lat !== undefined ? metresApart({ lat: d.lat, lng: d.lng }, body) : 0;
       if (moved > 500 && !confirm(`This moves ${d.name} ${moved} m. Is that right?`)) return false;
-      await api(`/devices/${d.id}`, { method: 'PATCH', body });
+      const saved = await api(`/devices/${d.id}`, { method: 'PATCH', body });
       await refresh();
+      registerBillingArea(saved.device);
       if (moved) map.panTo([body.lat, body.lng]);
       toast(moved ? `Saved — pin moved ${moved} m` : 'Saved', 'ok');
     },
