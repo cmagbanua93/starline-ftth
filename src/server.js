@@ -8,9 +8,6 @@ const { router: api } = require('./api');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const APP_PASSWORD = process.env.APP_PASSWORD || '';
-const SESSION_SECRET =
-  process.env.SESSION_SECRET || crypto.randomBytes(24).toString('hex');
 /* Other StarLine services (the ticketing system) call this API with a shared
    key instead of a browser session. Unset means no service may call in. */
 const API_TOKEN = process.env.API_TOKEN || '';
@@ -19,43 +16,13 @@ app.set('trust proxy', 1);
 app.use(express.json({ limit: '2mb' }));
 app.use(cookieParser());
 
-/* ---------------------------- auth gate ---------------------------- */
-
-function makeToken() {
-  return crypto.createHmac('sha256', SESSION_SECRET).update('ftth-session-v1').digest('hex');
-}
-
-function authed(req) {
-  if (!APP_PASSWORD) return true;
-  return req.cookies && req.cookies.ftth_session === makeToken();
-}
-
-app.post('/login', (req, res) => {
-  const supplied = String((req.body && req.body.password) || '');
-  if (!APP_PASSWORD) return res.json({ ok: true });
-  const a = Buffer.from(supplied);
-  const b = Buffer.from(APP_PASSWORD);
-  const ok = a.length === b.length && crypto.timingSafeEqual(a, b);
-  if (!ok) return res.status(401).json({ error: 'Wrong password' });
-  res.cookie('ftth_session', makeToken(), {
-    httpOnly: true,
-    sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',
-    maxAge: 1000 * 60 * 60 * 24 * 30,
-  });
-  res.json({ ok: true });
-});
-
-app.post('/logout', (req, res) => {
-  res.clearCookie('ftth_session');
-  res.json({ ok: true });
-});
+/* ---------------------------- auth ---------------------------- */
+/* Everyone signs in with their own username and password (see auth.js).
+   Admins can change the map; technician (viewer) accounts can only look. */
+const auth = require('./auth');
 
 app.get('/healthz', (req, res) => res.json({ ok: true }));
-
-app.get('/api/session', (req, res) =>
-  res.json({ authed: authed(req), passwordRequired: Boolean(APP_PASSWORD) })
-);
+app.use(auth.pub);                       // /api/session, /setup, /login, /logout
 
 /* A service key is accepted alongside the browser session, compared in constant
    time so it cannot be probed byte by byte. */
@@ -66,10 +33,8 @@ function serviceKeyOk(req) {
   return supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
 }
 
-app.use('/api', (req, res, next) => {
-  if (authed(req) || serviceKeyOk(req)) return next();
-  res.status(401).json({ error: 'Not signed in' });
-});
+app.use('/api', auth.gate(serviceKeyOk));
+app.use('/api', auth.api);               // /api/me/password, /api/users (admin)
 
 /* Map backgrounds. GOOGLE_MAPS_KEY is a browser key for Google's Map Tiles API —
    restrict it in Google Cloud to this site's address and to the Map Tiles API only.
@@ -92,6 +57,7 @@ async function start() {
   for (let attempt = 1; attempt <= 8 && !ready; attempt++) {
     try {
       await db.init();
+      await require('./auth').init();
       ready = true;
     } catch (e) {
       console.error(`[db] init attempt ${attempt} failed: ${e.message}`);
@@ -102,7 +68,6 @@ async function start() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`StarLine FTTH Network listening on ${PORT}`);
-    if (!APP_PASSWORD) console.log('[auth] APP_PASSWORD not set — the app is open to anyone with the URL');
     if (ready) backups.start();
   });
 }

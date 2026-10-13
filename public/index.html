@@ -3,43 +3,53 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-<title>StarLine FTTH Network</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23061a2e'/><path d='M16 5l2.9 6.6L26 12.4l-5.3 4.7 1.5 7-6.2-3.6-6.2 3.6 1.5-7L6 12.4l7.1-.8z' fill='%23e8b636'/></svg>" />
+<title>StarLine Internet · FTTH Map</title>
+<link rel="icon" type="image/png" href="icon.png" />
+<link rel="apple-touch-icon" href="icon.png" />
+<meta name="theme-color" content="#12304a" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;500;600;700&family=Montserrat:wght@600;700;800&family=Lato:wght@700;800&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
 <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
 
 <div id="login" class="login-screen" hidden>
-  <canvas id="stars"></canvas>
-  <form id="login-form" class="login-card">
-    <div class="login-logo">
-      <svg viewBox="0 0 32 32" aria-hidden="true">
-        <path d="M16 3l3.4 7.7L28 11.6l-6.2 5.5 1.8 8.2L16 21.1 8.4 25.3l1.8-8.2L4 11.6l8.6-.9z" fill="currentColor"/>
-      </svg>
+  <div class="login-brand">
+    <img src="logo.png" alt="StarLine Internet" />
+    <p>FTTH NETWORK MAP</p>
+  </div>
+  <form id="login-form" class="login-card" autocomplete="on">
+    <div class="login-h" id="login-h">Sign in</div>
+    <div class="login-sub" id="login-sub">Fiber network map · Minglanilla, Cebu</div>
+    <div id="setup-fields" hidden>
+      <p class="setup-note">First-time setup: create the <b>administrator</b> account. You can add technician accounts after signing in.</p>
+      <label id="setup-key-label" for="setup-key">Current map password</label>
+      <input type="password" id="setup-key" autocomplete="off" />
+      <label for="setup-name">Your name</label>
+      <input id="setup-name" autocomplete="name" placeholder="e.g. Chris" />
     </div>
-    <div class="login-eyebrow">StarLine Internet</div>
-    <h1>FTTH Network</h1>
-    <p class="muted">Minglanilla, Cebu</p>
-    <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" />
-    <button type="submit" class="btn primary block">Sign in</button>
+    <label for="login-username">Username</label>
+    <input id="login-username" autocomplete="username" autocapitalize="none" spellcheck="false" />
+    <label for="login-password">Password</label>
+    <input type="password" id="login-password" autocomplete="current-password" />
+    <div id="setup-confirm-wrap" hidden>
+      <label for="setup-password2">Repeat password</label>
+      <input type="password" id="setup-password2" autocomplete="new-password" />
+    </div>
+    <button type="submit" class="btn primary block" id="login-btn">Sign in</button>
     <div id="login-error" class="login-error"></div>
   </form>
+  <div class="login-foot">StarLine Internet · Minglanilla, Cebu</div>
 </div>
 
 <div id="app" hidden>
   <header class="topbar">
     <div class="brand">
-      <span class="brand-mark">
-        <svg viewBox="0 0 32 32" aria-hidden="true">
-          <path d="M16 3l3.4 7.7L28 11.6l-6.2 5.5 1.8 8.2L16 21.1 8.4 25.3l1.8-8.2L4 11.6l8.6-.9z" fill="currentColor"/>
-        </svg>
-      </span>
-      <div>
-        <strong>StarLine <em>FTTH Network</em></strong>
+      <img src="logo.png" alt="StarLine Internet" class="brand-logo" />
+      <div class="brand-txt">
+        <strong>FTTH Network Map</strong>
         <span class="brand-sub">Minglanilla, Cebu</span>
       </div>
     </div>
@@ -50,14 +60,20 @@
     </div>
 
     <div class="topbar-actions">
-      <button class="btn ghost" id="btn-export" title="Download a JSON backup of the whole network">Export</button>
+      <span class="who" id="who"></span>
+      <button class="btn ghost admin-only" id="btn-users" title="Create and manage accounts">Users</button>
+      <button class="btn ghost admin-only" id="btn-export" title="Download a JSON backup of the whole network">Export</button>
+      <button class="btn ghost" id="btn-password" title="Change your password">Password</button>
       <button class="btn ghost" id="btn-logout" title="Sign out">Sign out</button>
     </div>
   </header>
 
   <div class="layout">
     <aside class="sidebar">
-      <section class="panel">
+      <section class="panel viewer-only">
+        <div class="viewer-note">👁 View-only account — you can look, search and trace, but not change the map.</div>
+      </section>
+      <section class="panel edit-only">
         <h2>Place equipment</h2>
         <p class="hint">Pick a type, then click the map where it sits.</p>
         <div class="place-grid">

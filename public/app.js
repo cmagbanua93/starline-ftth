@@ -129,6 +129,7 @@ function initMap() {
   addGoogleLayers();   // adds Google Road / Satellite / Hybrid when a key is configured
 
   map.on('click', (e) => {
+    if (!isAdmin()) return;                       // view-only accounts never place or trace
     if (state.mode && state.mode.kind === 'place') {
       openNewDeviceModal(state.mode.type, e.latlng);
     } else if (state.mode && state.mode.kind === 'route') {
@@ -302,16 +303,10 @@ function renderMap() {
     seen.add(d.id);
     let m = markers.get(d.id);
     if (!m) {
-      m = L.marker([d.lat, d.lng], { icon: pinIcon(d), draggable: true, zIndexOffset: 400 });
+      /* Pins are fixed: a box only moves when its GPS coordinates are edited in
+         its settings, so a stray drag on a phone can never misplace it. */
+      m = L.marker([d.lat, d.lng], { icon: pinIcon(d), draggable: false, zIndexOffset: 400 });
       m.on('click', () => onDeviceClick(d.id));
-      m.on('dragend', async (e) => {
-        const { lat, lng } = e.target.getLatLng();
-        try {
-          await api(`/devices/${d.id}`, { method: 'PATCH', body: { lat, lng } });
-          await refresh({ keepSelection: true });
-          toast('Position updated', 'ok');
-        } catch (err) { toast(err.message, 'error'); await refresh(); }
-      });
       m.addTo(map);
       markers.set(d.id, m);
     } else {
@@ -354,15 +349,8 @@ function renderMap() {
     seenSubs.add(s.id);
     let m = subMarkers.get(s.id);
     if (!m) {
-      m = L.marker([s.lat, s.lng], { icon: subIcon(s), draggable: true, zIndexOffset: 200 });
+      m = L.marker([s.lat, s.lng], { icon: subIcon(s), draggable: false, zIndexOffset: 200 });   // moved only by editing its coordinates
       m.on('click', () => openSubscriber(s.id));
-      m.on('dragend', async (e) => {
-        const { lat, lng } = e.target.getLatLng();
-        try {
-          await api(`/subscribers/${s.id}`, { method: 'PATCH', body: { lat, lng } });
-          await refresh({ keepSelection: true });
-        } catch (err) { toast(err.message, 'error'); await refresh(); }
-      });
       m.addTo(map);
       subMarkers.set(s.id, m);
     } else {
@@ -509,6 +497,7 @@ async function saveRoute() {
 /** Draggable waypoints shown while a link is selected, for quick corrections. */
 function showRouteHandles(link) {
   clearRouteDraft();
+  if (!isAdmin()) return;              // view-only accounts see the route, not the editing handles
   const pts = Array.isArray(link.path) ? link.path : [];
   if (!pts.length) return;
   route.handles = pts.map((p, i) => {
@@ -1335,7 +1324,7 @@ function deviceFormHtml(d, type) {
       <div id="d-name-hint" class="muted" style="font-size:12px;margin-top:4px">${t === 'NAP' ? napNameHintHtml(d?.name || '') : ''}</div></div>
     ${d ? `<div class="field"><label>Coordinates (latitude, longitude)</label>
       <input id="d-coords" value="${Number(d.lat).toFixed(6)}, ${Number(d.lng).toFixed(6)}" placeholder="e.g. 10.237081, 123.788435" oninput="coordsHint(${Number(d.lat)}, ${Number(d.lng)})" />
-      <p class="hint" id="d-coords-hint">Paste the correct position — e.g. copied from Google Maps (press and hold on the spot, then copy the numbers). You can also drag the pin on the map.
+      <p class="hint" id="d-coords-hint">Pins cannot be dragged on the map — this is the only way to move the box. Paste the position, e.g. copied from Google Maps (press and hold on the spot, then copy the numbers).
         <a href="https://www.google.com/maps?q=${Number(d.lat)},${Number(d.lng)}" target="_blank" rel="noopener">Open current position in Google Maps</a></p></div>` : ''}
     <div class="field-row">
       <div class="field"><label>Type</label>
@@ -1697,22 +1686,31 @@ function openSubscriberModal(sub, portId) {
         <div class="field"><label>Phone</label><input id="s-phone" value="${esc(sub?.phone || '')}" /></div>
         <div class="field"><label>Drop cable (m)</label><input id="s-drop" type="number" min="0" value="${esc(sub?.drop_length_m ?? '')}" /></div>
       </div>
-      <div class="field-row">
-        <div class="field"><label>Latitude</label><input id="s-lat" value="${esc(sub?.lat ?? '')}" placeholder="optional" /></div>
-        <div class="field"><label>Longitude</label><input id="s-lng" value="${esc(sub?.lng ?? '')}" placeholder="optional" /></div>
-      </div>
+      <div class="field"><label>GPS coordinates (latitude, longitude)</label>
+        <input id="s-coords" value="${sub?.lat != null && sub?.lng != null ? Number(sub.lat).toFixed(6) + ', ' + Number(sub.lng).toFixed(6) : ''}" placeholder="e.g. 10.237081, 123.788435" />
+        <p class="hint">House pins cannot be dragged on the map — edit the position here. Paste it from Google Maps (press and hold on the house, then copy the numbers).</p></div>
       <div class="field"><label>Installed on</label><input id="s-installed" type="date" value="${esc(sub?.installed_on ? String(sub.installed_on).slice(0, 10) : '')}" /></div>
       <div class="field"><label>Notes</label><textarea id="s-notes">${esc(sub?.notes || '')}</textarea></div>
-      ${!sub && dev ? '<p class="hint">Leave lat/lng blank and the house pin sits on the NAP until you drag it.</p>' : ''}
+      ${!sub && dev ? '<p class="hint">Leave the coordinates blank and the house pin sits next to the NAP until you enter its real position.</p>' : ''}
     `,
     confirm: sub ? 'Save' : 'Add subscriber',
     onConfirm: async () => {
       const name = $('#s-name').value.trim();
       if (!name) throw new Error('Subscriber name is required');
-      let lat = $('#s-lat').value;
-      let lng = $('#s-lng').value;
-      if ((!lat || !lng) && dev) {
-        // drop the pin a few metres off the NAP so it is visible and draggable
+      const coordText = $('#s-coords').value.trim();
+      let lat = null, lng = null;
+      if (coordText) {
+        const c = parseCoords(coordText);
+        if (!c) throw new Error('Coordinates should look like 10.237081, 123.788435');
+        lat = c.lat; lng = c.lng;
+        if (sub && sub.lat != null) {
+          const moved = metresApart({ lat: sub.lat, lng: sub.lng }, c);
+          if (moved > 500 && !confirm(`This moves ${sub.name} ${moved} m. Is that right?`)) return false;
+        }
+      } else if (sub && sub.lat != null) {
+        lat = sub.lat; lng = sub.lng;          // a blank field never wipes a known position
+      } else if (dev) {
+        // a few metres off the NAP so the pin is visible until the real position is entered
         lat = dev.lat + 0.00018;
         lng = dev.lng + 0.00018;
       }
@@ -1815,60 +1813,149 @@ function runSearch(q) {
 }
 
 /* --------------------------------- auth --------------------------------- */
+/* Everyone signs in with their own account. Admins edit; viewers (technicians)
+   only look — the server refuses their changes, and the editing buttons are
+   hidden for them (body.viewer in styles.css). */
+let ME = null;
+let SESSION = null;
+const isAdmin = () => !!ME && ME.role === 'admin';
 
 function showLogin() {
   $('#login').hidden = false;
   $('#app').hidden = true;
-  startStarfield();
+  const setup = !!(SESSION && SESSION.needsSetup);
+  $('#setup-fields').hidden = !setup;
+  $('#setup-confirm-wrap').hidden = !setup;
+  $('#setup-key-label').hidden = $('#setup-key').hidden = !(setup && SESSION.setupKeyRequired);
+  $('#login-h').textContent = setup ? 'Create the administrator account' : 'Sign in';
+  $('#login-sub').textContent = setup ? 'This only appears once, before any account exists.' : 'Fiber network map · Minglanilla, Cebu';
+  $('#login-btn').textContent = setup ? 'Create admin account' : 'Sign in';
+  $('#login-password').autocomplete = setup ? 'new-password' : 'current-password';
+  setTimeout(() => (setup && SESSION.setupKeyRequired ? $('#setup-key') : $('#login-username')).focus(), 50);
 }
 
-/** The drifting starfield from starline.ph, reused on the sign-in screen. */
-function startStarfield() {
-  const canvas = $('#stars');
-  if (!canvas || canvas.dataset.running) return;
-  canvas.dataset.running = '1';
-  const ctx = canvas.getContext('2d');
-  let stars = [];
+async function submitLogin(e) {
+  e.preventDefault();
+  const err = $('#login-error');
+  err.textContent = '';
+  const setup = !!(SESSION && SESSION.needsSetup);
+  const body = { username: $('#login-username').value.trim(), password: $('#login-password').value };
+  if (setup) {
+    if (body.password !== $('#setup-password2').value) { err.textContent = 'The two passwords are not the same.'; return; }
+    body.name = $('#setup-name').value.trim();
+    body.setupKey = $('#setup-key').value;
+  }
+  const btn = $('#login-btn'); btn.disabled = true;
+  try {
+    const res = await fetch(setup ? '/setup' : '/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) { err.textContent = out.error || 'Could not sign in.'; return; }
+    location.reload();
+  } finally { btn.disabled = false; }
+}
 
-  const resize = () => {
-    canvas.width = canvas.offsetWidth;
-    canvas.height = canvas.offsetHeight;
-    const count = Math.floor((canvas.width * canvas.height) / 6000);
-    stars = Array.from({ length: count }, () => ({
-      x: Math.random() * canvas.width,
-      y: Math.random() * canvas.height,
-      r: Math.random() * 1.4 + 0.3,
-      baseAlpha: Math.random() * 0.6 + 0.2,
-      speed: Math.random() * 0.02 + 0.005,
-      phase: Math.random() * Math.PI * 2,
-    }));
-  };
+function applyRole() {
+  document.body.classList.toggle('viewer', !isAdmin());
+  document.body.classList.toggle('admin', isAdmin());
+  $('#who').innerHTML = `${esc(ME.name || ME.username)} <span class="role-chip ${ME.role}">${ME.role === 'admin' ? 'Admin' : 'View only'}</span>`;
+}
 
-  let t = 0;
-  const draw = () => {
-    if ($('#login').hidden) { canvas.dataset.running = ''; return; }
-    t += 1;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    for (const s of stars) {
-      const alpha = s.baseAlpha + Math.sin(t * s.speed + s.phase) * 0.3;
-      ctx.beginPath();
-      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(255, 255, 255, ${Math.max(0, Math.min(1, alpha))})`;
-      ctx.fill();
-    }
-    requestAnimationFrame(draw);
-  };
+/* ---- my password ---- */
+function openPasswordModal() {
+  openModal({
+    title: 'Change my password',
+    body: `
+      <div class="field"><label>Current password</label><input id="pw-cur" type="password" autocomplete="current-password" /></div>
+      <div class="field"><label>New password (8+ characters)</label><input id="pw-new" type="password" autocomplete="new-password" /></div>
+      <div class="field"><label>Repeat new password</label><input id="pw-new2" type="password" autocomplete="new-password" /></div>
+      <p class="hint">Other phones or computers signed in as you will be signed out.</p>`,
+    confirm: 'Change password',
+    onConfirm: async () => {
+      if ($('#pw-new').value !== $('#pw-new2').value) throw new Error('The two new passwords are not the same.');
+      await api('/me/password', { method: 'POST', body: { current: $('#pw-cur').value, password: $('#pw-new').value } });
+      toast('Password changed', 'ok');
+    },
+  });
+}
 
-  window.addEventListener('resize', resize);
-  resize();
-  draw();
+/* ---- accounts (admin) ---- */
+const fmtWhen = (t) => (t ? new Date(t).toLocaleString('en-PH', { dateStyle: 'medium', timeStyle: 'short' }) : 'never');
+
+async function openUsersModal() {
+  let data;
+  try { data = await api('/users'); } catch (e) { toast(e.message, 'error'); return; }
+  const rows = data.users.map((u) => `
+    <div class="user-row ${u.active ? '' : 'disabled'}">
+      <div class="user-main">
+        <div class="title">${esc(u.name || u.username)} <span class="role-chip ${u.role}">${u.role === 'admin' ? 'Admin' : 'View only'}</span>
+          ${u.active ? '' : '<span class="role-chip off">Disabled</span>'}${u.id === data.me ? ' <span class="hint-inline">(you)</span>' : ''}</div>
+        <div class="meta">@${esc(u.username)} · last sign-in ${esc(fmtWhen(u.last_login))}</div>
+      </div>
+      <div class="user-acts">
+        <button class="btn tiny" data-u-pass="${u.id}">Reset password</button>
+        ${u.id === data.me ? '' : `
+          <button class="btn tiny" data-u-role="${u.id}" data-role="${u.role === 'admin' ? 'viewer' : 'admin'}">${u.role === 'admin' ? 'Make view-only' : 'Make admin'}</button>
+          <button class="btn tiny" data-u-active="${u.id}" data-active="${u.active ? '0' : '1'}">${u.active ? 'Disable' : 'Enable'}</button>
+          <button class="btn tiny danger" data-u-del="${u.id}" data-name="${esc(u.username)}">Delete</button>`}
+      </div>
+    </div>`).join('');
+  openModal({
+    title: 'Accounts',
+    body: `
+      <div class="users-list">${rows}</div>
+      <div class="section-title"><span>Add an account</span></div>
+      <div class="field-row">
+        <div class="field"><label>Name</label><input id="nu-name" placeholder="e.g. Juan Dela Cruz" /></div>
+        <div class="field"><label>Username</label><input id="nu-username" autocapitalize="none" spellcheck="false" placeholder="e.g. juan" /></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Password (8+ characters)</label><input id="nu-password" type="text" autocomplete="off" /></div>
+        <div class="field"><label>Access</label>
+          <select id="nu-role">
+            <option value="viewer" selected>Technician — view only</option>
+            <option value="admin">Administrator — can edit</option>
+          </select></div>
+      </div>
+      <p class="hint">Give the technician their username and password in person. They can change the password after signing in (Password button).</p>`,
+    confirm: 'Create account',
+    afterOpen: () => {
+      const body = $('#modal-body');
+      const act = async (fn, okMsg) => { try { await fn(); toast(okMsg, 'ok'); openUsersModal(); } catch (e) { toast(e.message, 'error'); } };
+      body.querySelectorAll('[data-u-pass]').forEach((b) => b.onclick = () => {
+        const pw = prompt('New password for this account (8+ characters):');
+        if (pw) act(() => api(`/users/${b.dataset.uPass}`, { method: 'PATCH', body: { password: pw } }), 'Password reset — they are signed out until they use the new one');
+      });
+      body.querySelectorAll('[data-u-role]').forEach((b) => b.onclick = () =>
+        act(() => api(`/users/${b.dataset.uRole}`, { method: 'PATCH', body: { role: b.dataset.role } }), 'Access changed'));
+      body.querySelectorAll('[data-u-active]').forEach((b) => b.onclick = () =>
+        act(() => api(`/users/${b.dataset.uActive}`, { method: 'PATCH', body: { active: b.dataset.active === '1' } }),
+          b.dataset.active === '1' ? 'Account enabled' : 'Account disabled — signed out everywhere'));
+      body.querySelectorAll('[data-u-del]').forEach((b) => b.onclick = () => {
+        if (!confirm(`Delete the account "${b.dataset.name}"? This cannot be undone.`)) return;
+        act(() => api(`/users/${b.dataset.uDel}`, { method: 'DELETE' }), 'Account deleted');
+      });
+    },
+    onConfirm: async () => {
+      const body = {
+        name: $('#nu-name').value.trim(), username: $('#nu-username').value.trim(),
+        password: $('#nu-password').value, role: $('#nu-role').value,
+      };
+      await api('/users', { method: 'POST', body });
+      toast(`Account "${body.username.toLowerCase()}" created`, 'ok');
+      setTimeout(openUsersModal, 50);
+    },
+  });
 }
 
 async function boot() {
-  const s = await fetch('/api/session').then((r) => r.json());
-  if (!s.authed) { showLogin(); return; }
+  SESSION = await fetch('/api/session').then((r) => r.json());
+  if (!SESSION.authed) { showLogin(); return; }
+  ME = SESSION.user;
   $('#login').hidden = true;
   $('#app').hidden = false;
+  applyRole();
   initMap();
   await refresh({ keepSelection: false });
   fitToNetwork();
@@ -1878,17 +1965,9 @@ async function boot() {
 /* ------------------------------- wiring --------------------------------- */
 
 document.addEventListener('DOMContentLoaded', () => {
-  $('#login-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    $('#login-error').textContent = '';
-    const res = await fetch('/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: $('#login-password').value }),
-    });
-    if (!res.ok) { $('#login-error').textContent = 'Wrong password'; return; }
-    location.reload();
-  });
+  $('#login-form').addEventListener('submit', submitLogin);
+  $('#btn-users').addEventListener('click', openUsersModal);
+  $('#btn-password').addEventListener('click', openPasswordModal);
 
   document.querySelectorAll('.place-btn').forEach((b) =>
     b.addEventListener('click', () => {
