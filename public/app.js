@@ -627,7 +627,9 @@ function portName(p) {
   if (dev?.type === 'JOINT') {
     return `core ${p.port_no}${cm ? ' ' + cm.name.toLowerCase() : ''} ${p.port_kind === 'in' ? 'in' : 'out'}`;
   }
+  if (p.role === 'thru') return 'to next box';
   if (p.port_kind === 'in') {
+    if (dev?.tap) return 'from previous box';
     return dev && dev.input_count > 1 ? `feeder in ${p.port_no}` : 'feeder in';
   }
   return cm && dev?.port_labeling && dev.port_labeling !== 'number'
@@ -654,7 +656,8 @@ function portCellHtml(p, labeling) {
   const style = showColor && labeling === 'color'
     ? `background:${cm.hex};color:${cm.ink}`
     : '';
-  const face = p.port_kind === 'in'
+  const face = p.role === 'thru' ? '→ next'
+    : p.port_kind === 'in'
     ? 'IN'
     : labeling === 'color' ? cm?.short ?? p.port_no
     : labeling === 'both' ? `${p.port_no}` : `${p.port_no}`;
@@ -663,8 +666,9 @@ function portCellHtml(p, labeling) {
     ? `<span class="stripe" style="background:${cm.hex}"></span>` : '';
 
   const what = sub ? sub.name : link ? 'fiber link' : p.label || 'free';
-  const title = p.port_kind === 'in'
-    ? `Feeder in ${p.port_no} — ${what}`
+  const title = p.role === 'thru' ? `${p.label || 'To next box'} — ${what}`
+    : p.port_kind === 'in'
+    ? `${p.label || 'Feeder in ' + p.port_no} — ${what}`
     : `Port ${p.port_no}${cm ? ' · ' + cm.name : ''} — ${what}`;
 
   const colored = showColor && labeling === 'color';
@@ -745,12 +749,17 @@ function portGridHtml(device, opts = {}) {
   if (!ports.length) return '<div class="empty">No ports configured. Set a port count below.</div>';
   const labeling = device.port_labeling || 'number';
   const ins = ports.filter((p) => p.port_kind === 'in');
-  const outs = ports.filter((p) => p.port_kind !== 'in');
+  const outs = ports.filter((p) => p.port_kind !== 'in' && p.role !== 'thru');
+  const thrus = ports.filter((p) => p.role === 'thru');
   const meta = TYPE_META[device.type] || TYPE_META.JOINT;
 
   const inBlock = ins.length
-    ? `<div class="port-sub">Feeder in — the cable arriving from upstream</div>
+    ? `<div class="port-sub">${device.tap ? `From previous box — the cable arriving from upstream (${esc(ins[0].label || 'feeder in')})` : 'Feeder in — the cable arriving from upstream'}</div>
        <div class="port-grid feeder-grid">${ins.map((p) => portCellHtml(p, labeling)).join('')}</div>`
+    : '';
+  const thruBlock = thrus.length
+    ? `<div class="port-sub">To next box — the 85% pass-through that feeds the next cassette (${esc(thrus[0].label || '')})</div>
+       <div class="port-grid feeder-grid">${thrus.map((p) => portCellHtml(p, labeling)).join('')}</div>`
     : '';
 
   const ringKey = labeling === 'color'
@@ -776,8 +785,43 @@ function portGridHtml(device, opts = {}) {
          closure that is normally its <strong>feeder in</strong> — the numbered
          output ports are what it feeds onward.</p>`;
 
-  return `${targetHint}${inBlock}${outBlock}`;
+  return `${targetHint}${inBlock}${thruBlock}${outBlock}`;
 }
+
+/* A run of FBT tap cassettes, each fed from the "to next box" output of the one
+   before. Returns { boxes: [device…], index } for the chain this box sits in. */
+function tapChain(device) {
+  if (!device || !device.tap) return null;
+  const feederOf = (d) => {
+    const inp = (state.portsOf.get(d.id) || []).find((p) => p.port_kind === 'in');
+    const l = inp && state.linkByPort.get(inp.id);
+    if (!l) return null;
+    const other = state.byPort.get(l.from_port_id === inp.id ? l.to_port_id : l.from_port_id);
+    return other ? { port: other, device: state.byDevice.get(other.device_id) } : null;
+  };
+  const nextOf = (d) => {
+    const th = (state.portsOf.get(d.id) || []).find((p) => p.role === 'thru');
+    const l = th && state.linkByPort.get(th.id);
+    if (!l) return null;
+    const other = state.byPort.get(l.from_port_id === th.id ? l.to_port_id : l.from_port_id);
+    const nd = other && state.byDevice.get(other.device_id);
+    return nd && nd.tap ? nd : null;
+  };
+  const before = [];
+  let cur = device, guard = 0;
+  while (guard++ < 30) {
+    const f = feederOf(cur);
+    if (!f || !f.device || !f.device.tap || f.port.role !== 'thru') break;
+    before.unshift(f.device); cur = f.device;
+  }
+  const after = [];
+  cur = device; guard = 0;
+  while (guard++ < 30) { const n = nextOf(cur); if (!n || after.includes(n)) break; after.push(n); cur = n; }
+  const boxes = [...before, device, ...after];
+  const head = feederOf(boxes[0]);
+  return { boxes, index: before.length, head };
+}
+const ordinal = (n) => n + (n % 10 === 1 && n % 100 !== 11 ? 'st' : n % 10 === 2 && n % 100 !== 12 ? 'nd' : n % 10 === 3 && n % 100 !== 13 ? 'rd' : 'th');
 
 function openDevice(deviceId, opts = {}) {
   const d = state.byDevice.get(deviceId);
@@ -793,6 +837,13 @@ function openDevice(deviceId, opts = {}) {
       <li><span class="k">Status</span><span class="v">${statusPill(d.status)}</span></li>
       ${d.model ? `<li><span class="k">Model</span><span class="v">${esc(d.model)}</span></li>` : ''}
       ${d.splitter_ratio ? `<li><span class="k">Split ratio</span><span class="v">${esc(d.splitter_ratio)}</span></li>` : ''}
+      ${(() => { const ch = tapChain(d); if (!ch) return '';
+        const n = ch.index + 1, total = ch.boxes.length;
+        const nextBox = ch.boxes[ch.index + 1];
+        const loss = (19.8 + 0.93 * ch.index).toFixed(1);
+        return `<li><span class="k">Tap chain</span><span class="v">${ordinal(n)} of ${total}${ch.head && ch.head.device ? ` · fed from ${esc(ch.head.device.name)} ${esc(portName(ch.head.port))}` : ' · not connected upstream'}</span></li>
+          <li><span class="k">To next box</span><span class="v">${nextBox ? esc(nextBox.name) : 'nothing connected (spare / capped)'}</span></li>
+          <li><span class="k">Expected at ports</span><span class="v">≈ ${loss} dB below the chain's input${ch.index ? ` (${ch.index} pass-through${ch.index > 1 ? 's' : ''} before this box)` : ''}, plus cable losses</span></li>`; })()}
       ${d.area ? `<li><span class="k">Area</span><span class="v">${esc(d.area)}</span></li>` : ''}
       ${d.address ? `<li><span class="k">Address</span><span class="v">${esc(d.address)}</span></li>` : ''}
       ${d.type === 'JOINT'
@@ -1343,6 +1394,13 @@ function deviceFormHtml(d, type) {
         <label>Feeder-in ports</label>
         <input id="d-inputs" type="number" min="0" max="8" value="${d?.input_count ?? meta.defaultIn}" /></div>
     </div>
+    <div class="field" id="d-tap-field" ${t === 'NAP' ? '' : 'style="display:none"'}>
+      <label style="display:flex;gap:8px;align-items:center;text-transform:none;font-weight:600">
+        <input id="d-tap" type="checkbox" style="width:auto" ${d?.tap ? 'checked' : ''}
+          onchange="if(this.checked){document.getElementById('d-ports').value=8;document.getElementById('d-ratio').value='FBT 15/85 + 1:8';}">
+        FBT tap cassette (15/85 + 1:8) — 8 subscriber ports plus a "to next box" pass-through</label>
+      <p class="hint">For cassettes chained one after another (e.g. …-SUB2-NAP1 → NAP2 → NAP3 → NAP4). Technicians only see ports 1–8 for houses; the pass-through shows up only when installing the next box.</p>
+    </div>
     <p class="hint" id="d-ports-hint">${t === 'JOINT'
       ? 'Each core is one fusion splice with an in side and an out side — an 8-core closure is 8 splices.'
       : 'A 1:8 NAP is 1 feeder in + 8 out. Use 2 feeder-ins for a loop-through closure fed from both directions.'}</p>
@@ -1489,6 +1547,7 @@ function applyTypeToDeviceForm(type) {
     ? 'Cores (splices)'
     : `Output ports (${TYPE_META[type]?.hint || 'ports'})`;
   $('#d-inputs-field').style.display = isJoint ? 'none' : '';
+  if (document.getElementById('d-tap-field')) $('#d-tap-field').style.display = type === 'NAP' ? '' : 'none';
   $('#d-ports-hint').textContent = isJoint
     ? 'Each core is one fusion splice with an in side and an out side — an 8-core closure is 8 splices.'
     : 'A 1:8 NAP is 1 feeder in + 8 out. Use 2 feeder-ins for a loop-through closure fed from both directions.';
@@ -1528,6 +1587,7 @@ function readDeviceForm() {
     input_count: $('#d-inputs').value,
     port_labeling: $('#d-labeling').value,
     splitter_ratio: $('#d-ratio').value,
+    ...(document.getElementById('d-tap') && $('#d-type').value === 'NAP' ? { tap: $('#d-tap').checked } : {}),
     model: $('#d-model').value,
     area: $('#d-area').value,
     address: $('#d-address').value,

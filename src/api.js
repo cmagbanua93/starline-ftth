@@ -76,9 +76,16 @@ router.get('/network', async (req, res, next) => {
  * Output ports are given their TIA-598-C pigtail colour by position, because
  * that is how they are identified in the field.
  */
+/* FBT tap cassette: the pigtail numbers printed on the cassette (env-overridable). */
+const FBT_IN_LABEL = process.env.FBT_IN_LABEL || '201';
+const FBT_THRU_LABEL = process.env.FBT_THRU_LABEL || '202';
+const THRU_PORT_NO = 100;              // kept clear of the numbered subscriber ports
+const TAP_RATIO = 'FBT 15/85 + 1:8';
+
 async function syncPorts(client, deviceId, outCount, inCount, deviceType) {
   const existing = await client.query(
-    'SELECT id, port_no, port_kind, status FROM ports WHERE device_id = $1 ORDER BY port_kind, port_no',
+    `SELECT id, port_no, port_kind, status FROM ports WHERE device_id = $1 AND role IS DISTINCT FROM 'thru'
+     ORDER BY port_kind, port_no`,
     [deviceId]
   );
 
@@ -114,6 +121,30 @@ async function syncPorts(client, deviceId, outCount, inCount, deviceType) {
       }
     }
   }
+  await syncTapPort(client, deviceId);
+}
+
+/* A tap box has one extra output, "to next box", and its feeder-in is labelled
+   with the pigtail number printed on the cassette. Taking the tap off removes the
+   extra output unless a cable is still plugged into it. */
+async function syncTapPort(client, deviceId) {
+  const d = await client.query('SELECT tap FROM devices WHERE id = $1', [deviceId]);
+  const tap = !!(d.rowCount && d.rows[0].tap);
+  const thru = await client.query(`SELECT id FROM ports WHERE device_id = $1 AND role = 'thru'`, [deviceId]);
+  if (tap) {
+    if (!thru.rowCount) {
+      await client.query(
+        `INSERT INTO ports (device_id, port_no, port_kind, label, role) VALUES ($1, $2, 'out', $3, 'thru')
+         ON CONFLICT DO NOTHING`, [deviceId, THRU_PORT_NO, `To next box · ${FBT_THRU_LABEL}`]);
+    }
+    await client.query(
+      `UPDATE ports SET label = $2 WHERE device_id = $1 AND port_kind = 'in' AND (label IS NULL OR label LIKE 'Feeder in%')`,
+      [deviceId, `From previous box · ${FBT_IN_LABEL}`]);
+  } else if (thru.rowCount) {
+    const linked = await client.query('SELECT 1 FROM links WHERE from_port_id = $1 OR to_port_id = $1 LIMIT 1', [thru.rows[0].id]);
+    if (!linked.rowCount) await client.query('DELETE FROM ports WHERE id = $1', [thru.rows[0].id]);
+    await client.query(`UPDATE ports SET label = 'Feeder in' WHERE device_id = $1 AND port_kind = 'in' AND label LIKE 'From previous box%'`, [deviceId]);
+  }
 }
 
 router.post('/devices', async (req, res, next) => {
@@ -138,11 +169,12 @@ router.post('/devices', async (req, res, next) => {
     const device = await withTx(async (client) => {
       const r = await client.query(
         `INSERT INTO devices (type, name, lat, lng, model, status, port_count, input_count,
-                              port_labeling, splitter_ratio, area, address, notes)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+                              port_labeling, splitter_ratio, area, address, notes, tap)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
         [
           b.type, name, lat, lng, clean(b.model), status, portCount, inputCount, labeling,
-          clean(b.splitter_ratio), clean(b.area), clean(b.address), clean(b.notes),
+          b.tap && b.type === 'NAP' ? TAP_RATIO : clean(b.splitter_ratio), clean(b.area), clean(b.address), clean(b.notes),
+          !!b.tap && b.type === 'NAP',
         ]
       );
       await syncPorts(client, r.rows[0].id, portCount, inputCount, b.type);
@@ -189,6 +221,10 @@ router.patch('/devices/:id', async (req, res, next) => {
       if (b[col] !== undefined) set(col, clean(b[col]));
     }
 
+    if (b.tap !== undefined) {
+      set('tap', !!b.tap);
+      if (b.tap && b.splitter_ratio === undefined) set('splitter_ratio', TAP_RATIO);
+    }
     if (b.port_labeling !== undefined) {
       if (!LABELING.includes(b.port_labeling)) return bad(res, 'invalid port labeling');
       set('port_labeling', b.port_labeling);
@@ -226,7 +262,7 @@ router.patch('/devices/:id', async (req, res, next) => {
         values
       );
       if (!r.rowCount) return null;
-      if (portCount !== undefined || inputCount !== undefined || b.type !== undefined) {
+      if (portCount !== undefined || inputCount !== undefined || b.type !== undefined || b.tap !== undefined) {
         await syncPorts(
           client,
           req.params.id,
@@ -715,9 +751,9 @@ router.get('/nap-candidates', async (req, res, next) => {
     const lng = asNum(req.query.lng);
 
     const [devices, ports, links, subs] = await Promise.all([
-      query(`SELECT id, name, type, area, lat, lng, status, port_labeling
+      query(`SELECT id, name, type, area, lat, lng, status, port_labeling, tap, splitter_ratio
              FROM devices WHERE type IN ('NAP','SPLITTER') ORDER BY name`).then((r) => r.rows),
-      query(`SELECT id, device_id, port_no, label, status, fiber_color, reserved_for
+      query(`SELECT id, device_id, port_no, label, status, fiber_color, reserved_for, role
              FROM ports WHERE port_kind = 'out' ORDER BY device_id, port_no`).then((r) => r.rows),
       query('SELECT from_port_id, to_port_id FROM links').then((r) => r.rows),
       query('SELECT port_id FROM subscribers WHERE port_id IS NOT NULL').then((r) => r.rows),
@@ -728,11 +764,16 @@ router.get('/nap-candidates', async (req, res, next) => {
     for (const s of subs) taken.add(s.port_id);
 
     const byDevice = new Map();
+    const thruOf = new Map();          // tap boxes: the "to next box" output, kept out of the subscriber ports
     for (const p of ports) {
       let state = 'free';
       if (taken.has(p.id) || p.status === 'used') state = 'occupied';
       else if (p.status === 'faulty') state = 'faulty';
       else if (p.status === 'reserved') state = 'reserved';
+      if (p.role === 'thru') {
+        thruOf.set(p.device_id, { id: p.id, label: p.label, state, pigtail: FBT_THRU_LABEL });
+        continue;
+      }
       if (!byDevice.has(p.device_id)) byDevice.set(p.device_id, []);
       byDevice.get(p.device_id).push({
         id: p.id, port_no: p.port_no, label: p.label,
@@ -746,6 +787,7 @@ router.get('/nap-candidates', async (req, res, next) => {
       return {
         id: d.id, name: d.name, type: d.type, area: d.area,
         lat: d.lat, lng: d.lng, status: d.status, port_labeling: d.port_labeling,
+        tap: !!d.tap, splitter_ratio: d.splitter_ratio, thru: thruOf.get(d.id) || null,
         ports: ps,
         counts: { total: ps.length, free: count('free'), reserved: count('reserved'),
                   occupied: count('occupied'), faulty: count('faulty') },
@@ -774,8 +816,9 @@ router.get('/nap-candidates', async (req, res, next) => {
 });
 
 /* Shared checks: is this port genuinely available to `ticketId`? */
-async function portBlocker(client, port, ticketId) {
+async function portBlocker(client, port, ticketId, opts = {}) {
   if (port.port_kind === 'in') return { code: 400, error: 'a subscriber cannot sit on a feeder-in port' };
+  if (port.role === 'thru' && !opts.feeder) return { code: 400, error: 'that is the "to next box" pass-through of a tap cassette, not a subscriber port' };
   const linked = await client.query('SELECT 1 FROM links WHERE from_port_id = $1 OR to_port_id = $1', [port.id]);
   if (linked.rowCount) return { code: 409, error: 'that port carries a fiber link' };
   const held = await client.query('SELECT 1 FROM subscribers WHERE port_id = $1', [port.id]);
@@ -793,12 +836,14 @@ router.post('/ports/:id/reserve', async (req, res, next) => {
   try {
     const ticketId = clean((req.body || {}).ticketId);
     if (!ticketId) return bad(res, 'ticketId required');
+    /* a NAP job holding a "to next box" output to feed its new box (a house never may) */
+    const feeder = (req.body || {}).purpose === 'feeder';
 
     const out = await withTx(async (client) => {
       const r = await client.query('SELECT * FROM ports WHERE id = $1 FOR UPDATE', [req.params.id]);
       if (!r.rowCount) return { code: 404, error: 'port not found' };
       const port = r.rows[0];
-      const blocked = await portBlocker(client, port, ticketId);
+      const blocked = await portBlocker(client, port, ticketId, { feeder });
       if (blocked) return blocked;
       const u = await client.query(
         `UPDATE ports SET status = 'reserved', reserved_for = $2, reserved_at = now()
@@ -913,11 +958,25 @@ async function addCompanionCassette(client, main, secondaryPorts, ticketId) {
  * AREA-LCPk / AREA-LCPk-SUBp / AREA-LCPk-SUBp-NAPn / AREA-LCPk-NAPn — the SUB and NAP
  * numbers are the port of the box it is fed from, so the name can be suggested from the map. */
 const NAP_NAME_RE = /^[A-Z0-9]+-LCP\d{1,2}(-SUB\d{1,2}(-NAP\d{1,2})?|-NAP\d{1,2})?$/;
+/* The name a box should have from what feeds it.
+   - from port p of an LCP: a 4-port box -> LCP-SUBp; a tap cassette (start of a chain) -> LCP-SUBp-NAP1; else LCP-NAPp
+   - from port n of a sub-main -> SUB-NAPn
+   - from the "to next box" output of ...-SUBp-NAPn (a tap chain) -> ...-SUBp-NAP(n+1) */
+function suggestNapName(feederName, feederPort, feederRole, box) {
+  const fn = String(feederName || '').toUpperCase();
+  if (feederRole === 'thru') {
+    const m = /^(.*-SUB\d+-NAP)(\d+)$/.exec(fn);
+    return m ? m[1] + (parseInt(m[2], 10) + 1) : '';
+  }
+  if (/-LCP\d+$/.test(fn)) return box && box.tap ? `${fn}-SUB${feederPort}-NAP1` : fn + (Number(box && box.ports) === 4 ? '-SUB' : '-NAP') + feederPort;
+  if (/-SUB\d+$/.test(fn)) return fn + '-NAP' + feederPort;
+  return '';
+}
 router.get('/naming', async (req, res, next) => {
   try {
     const r = await query(
-      `SELECT d.id, d.name, d.area, d.status, d.port_count,
-              f.name AS feeder_name, fp.port_no AS feeder_port
+      `SELECT d.id, d.name, d.area, d.status, d.port_count, d.tap,
+              f.name AS feeder_name, fp.port_no AS feeder_port, fp.role AS feeder_role
          FROM devices d
          LEFT JOIN LATERAL (
            SELECT l.from_port_id FROM ports ip JOIN links l ON l.to_port_id = ip.id
@@ -929,10 +988,7 @@ router.get('/naming', async (req, res, next) => {
     const boxes = r.rows.map((b) => {
       let suggested = '';
       const fn = String(b.feeder_name || '').toUpperCase();
-      if (b.feeder_port && NAP_NAME_RE.test(fn)) {
-        if (/-LCP\d+$/.test(fn)) suggested = fn + (Number(b.port_count) === 4 ? '-SUB' : '-NAP') + b.feeder_port;
-        else if (/-SUB\d+$/.test(fn)) suggested = fn + '-NAP' + b.feeder_port;
-      }
+      if (b.feeder_port && NAP_NAME_RE.test(fn)) suggested = suggestNapName(fn, b.feeder_port, b.feeder_role, { ports: b.port_count, tap: b.tap });
       return { id: b.id, name: b.name, area: b.area, status: b.status, port_count: b.port_count,
         feeder: b.feeder_name ? { name: b.feeder_name, port_no: b.feeder_port } : null, suggested };
     });
@@ -961,7 +1017,7 @@ router.post('/naming/rename', async (req, res, next) => {
 router.get('/planned-naps', async (req, res, next) => {
   try {
     const planned = await query(
-      `SELECT id, name, lat, lng, area, address, notes, port_count FROM devices
+      `SELECT id, name, lat, lng, area, address, notes, port_count, tap FROM devices
        WHERE type = 'NAP' AND status = 'planned' AND installed_by_ticket IS NULL ORDER BY name`
     );
     const existing = await query(
@@ -1021,6 +1077,11 @@ router.post('/nap-installs', async (req, res, next) => {
       return bad(res, 'box size must be 4, 8, 12 or 16 ports');
     }
     const status = DEVICE_STATUS.includes(nap.status) ? nap.status : 'active';
+    /* FBT tap cassette: always 8 subscriber ports plus "to next box" */
+    const tap = !!nap.tap;
+    if (tap && portCount && portCount !== 8) return bad(res, 'an FBT tap cassette has 8 subscriber ports');
+    const enclosure = parseInt(nap.enclosure_ports, 10);
+    const modelText = clean(nap.model) || (([8, 16].includes(enclosure) ? `${enclosure}-port NAP box` : '') + (tap ? ' · FBT 15/85 + 1:8 cassette' : '')).replace(/^ · /, '') || null;
     const combo = b.combo || nap.combo || null;
     const secondaryPorts = combo ? parseInt(combo.secondary_ports, 10) : 0;
     if (combo && ![4, 8, 12, 16].includes(secondaryPorts)) return bad(res, 'the second cassette must be 4, 8, 12 or 16 ports');
@@ -1061,11 +1122,12 @@ router.post('/nap-installs', async (req, res, next) => {
         const r = await client.query(
           `UPDATE devices SET lat = $2, lng = $3, status = $4, model = COALESCE($5, model),
              port_count = CASE WHEN $6::int > 0 THEN $6::int ELSE port_count END,
-             splitter_ratio = CASE WHEN $6::int > 0 THEN '1:' || $6::int ELSE splitter_ratio END,
+             splitter_ratio = CASE WHEN $10::boolean THEN $11 WHEN $6::int > 0 THEN '1:' || $6::int ELSE splitter_ratio END,
+             tap = $10::boolean,
              area = COALESCE(NULLIF(area, ''), name), address = COALESCE($7, address), notes = $8,
              installed_by_ticket = $1, updated_at = now()
            WHERE id = $9 RETURNING *`,
-          [ticketId, lat, lng, status, clean(nap.model), portCount, clean(nap.address), note, plannedId]
+          [ticketId, lat, lng, status, modelText, portCount, clean(nap.address), note, plannedId, tap, TAP_RATIO]
         );
         const device = r.rows[0];
         await syncPorts(client, device.id, device.port_count, 1, 'NAP');
@@ -1099,13 +1161,13 @@ router.post('/nap-installs', async (req, res, next) => {
     const out = await withTx(async (client) => {
       const r = await client.query(
         `INSERT INTO devices (type, name, lat, lng, model, status, port_count, input_count,
-                              port_labeling, splitter_ratio, area, address, notes, installed_by_ticket)
-         VALUES ('NAP',$1,$2,$3,$4,$5,$6,1,'number',$7,$8,$9,$10,$11) RETURNING *`,
+                              port_labeling, splitter_ratio, area, address, notes, installed_by_ticket, tap)
+         VALUES ('NAP',$1,$2,$3,$4,$5,$6,1,'number',$7,$8,$9,$10,$11,$12) RETURNING *`,
         [
-          name, lat, lng, clean(nap.model), status, portCount,
-          portCount ? '1:' + portCount : '',   // a 4-port cassette is a 1:4; blank when unknown
+          name, lat, lng, modelText, status, portCount,
+          tap ? TAP_RATIO : portCount ? '1:' + portCount : '',   // a 4-port cassette is a 1:4; blank when unknown
           clean(nap.area) || name,     // the box name and the billing area are one value
-          clean(nap.address), clean(nap.notes), ticketId,
+          clean(nap.address), clean(nap.notes), ticketId, tap,
         ]
       );
       const device = r.rows[0];

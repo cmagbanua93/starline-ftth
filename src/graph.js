@@ -252,6 +252,7 @@ function capacityByDevice(devices, ports, links, subscribers) {
     if (!c) continue;
     // Feeder-in ports are not sellable capacity, so they stay out of the counts.
     if (p.port_kind === 'in') continue;
+    if (p.role === 'thru') continue;   // a tap box's "to next box" output feeds the chain, not a house
     c.total += 1;
     if (p.status === 'used') c.used += 1;
     else if (p.status === 'reserved') c.reserved += 1;

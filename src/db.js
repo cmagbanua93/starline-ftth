@@ -81,6 +81,10 @@ ALTER TABLE devices ADD COLUMN IF NOT EXISTS input_count integer NOT NULL DEFAUL
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS port_labeling text NOT NULL DEFAULT 'number';
 ALTER TABLE ports   ADD COLUMN IF NOT EXISTS port_kind text NOT NULL DEFAULT 'out';
 ALTER TABLE ports   ADD COLUMN IF NOT EXISTS fiber_color text;
+/* FBT tap cassettes (15/85 + 1:8): 8 subscriber ports plus a pass-through output
+   ("to next box", role 'thru') that feeds the next cassette in a chain. */
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS tap boolean NOT NULL DEFAULT false;
+ALTER TABLE ports   ADD COLUMN IF NOT EXISTS role text;
 /* Which NAP-install job planted this box. A completed job that is reopened and
    completed again must find its box already here rather than plant a second one
    on the same post. */
