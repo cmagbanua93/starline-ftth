@@ -1251,8 +1251,87 @@ router.post('/installations', async (req, res, next) => {
     if (e && e.code === '23505') {
       const again = await query('SELECT * FROM subscribers WHERE installed_by_ticket = $1', [ticketId]);
       if (again.rowCount) return res.json({ already: true, subscriber: again.rows[0] });
-      return res.status(409).json({ error: 'that PPPoE username is already on the map' });
+      const u = clean(s.pppoe_username);
+      const who = u ? await query(
+        `SELECT s.name, s.status, d.name AS box, p.port_no FROM subscribers s
+           LEFT JOIN ports p ON p.id = s.port_id LEFT JOIN devices d ON d.id = p.device_id
+          WHERE lower(s.pppoe_username) = lower($1)`, [u]).catch(() => ({ rows: [] })) : { rows: [] };
+      const h = who.rows[0];
+      return res.status(409).json({ error: h
+        ? `that PPPoE username (${u}) is already on the map — on ${h.name}'s pin` +
+          (h.box ? ` at ${h.box} port ${h.port_no}` : '') + ` (${h.status}). Change or clear the PPPoE on that pin`
+        : 'that PPPoE username is already on the map' });
     }
+    next(e);
+  }
+});
+
+/* Modem replaced on a repair: the subscriber now runs on the PPPoE account that
+   is programmed in the replacement modem. Called by the monitor after billing has
+   made the same change (ticketing → monitor /api/billing-modem-swap → here).
+     body: { from: 'sl167', to: 'sl170', ticketId, account? }
+   - The subscriber's pin (found by `from`, else by account number) takes `to`.
+   - Another pin that still carries `to` (the former owner of the re-used modem)
+     gives it up: its PPPoE is cleared and it is marked disconnected, with a note.
+   - The old account (`from`, in the defective modem) is a spare: no pin keeps it.
+   Safe to call again: a pin already on `to` is reported as done. */
+const PPPOE_RE = /^[a-z0-9][a-z0-9._-]{0,39}$/i;
+const manilaDay = () => new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
+const addNote = (notes, line) => (notes ? notes + '\n' : '') + line;
+
+router.post('/pppoe-swap', async (req, res, next) => {
+  const b = req.body || {};
+  const from = String(b.from || '').trim().toLowerCase();
+  const to = String(b.to || '').trim().toLowerCase();
+  const ticketId = clean(b.ticketId) || '';
+  const account = clean(b.account) || '';
+  if (!PPPOE_RE.test(to)) return bad(res, 'a valid new PPPoE username ("to") is required');
+  if (from && !PPPOE_RE.test(from)) return bad(res, '"from" is not a valid PPPoE username');
+  if (from === to) return res.json({ ok: true, status: 'skipped', detail: `old and new PPPoE are the same (${to})` });
+
+  try {
+    const out = await withTx(async (client) => {
+      const one = async (sql, args) => (await client.query(sql, args)).rows;
+      let subs = from ? await one('SELECT * FROM subscribers WHERE lower(pppoe_username) = $1 FOR UPDATE', [from]) : [];
+      if (!subs.length && account) subs = await one('SELECT * FROM subscribers WHERE account_no = $1 FOR UPDATE', [account]);
+      const onTo = await one('SELECT * FROM subscribers WHERE lower(pppoe_username) = $1 FOR UPDATE', [to]);
+
+      if (!subs.length) {
+        if (onTo.length) {
+          return { status: 'skipped', subscriber: onTo[0], detail: `${onTo[0].name}'s pin is already on ${to}` };
+        }
+        return { status: 'skipped', detail: `no pin on the map has ${from || 'account ' + account} — nothing to change` };
+      }
+      if (subs.length > 1) return { code: 409, error: `${subs.length} pins match account ${account} — fix that on the map` };
+      const sub = subs[0];
+      const why = `modem replaced${ticketId ? ' (' + ticketId + ')' : ''} ${manilaDay()}`;
+
+      /* the re-used modem's former owner gives the account up */
+      let freed = null;
+      const holder = onTo.find(s => s.id !== sub.id);
+      if (holder) {
+        const st = holder.status === 'active' ? 'disconnected' : holder.status;
+        const r = await one(
+          `UPDATE subscribers SET pppoe_username = NULL, status = $2, notes = $3, updated_at = now()
+           WHERE id = $1 RETURNING *`,
+          [holder.id, st, addNote(holder.notes, `PPPoE ${to} moved to ${sub.name} — ${why}`)]);
+        freed = r[0];
+      }
+
+      const r = await one(
+        `UPDATE subscribers SET pppoe_username = $2, notes = $3, updated_at = now() WHERE id = $1 RETURNING *`,
+        [sub.id, to, addNote(sub.notes, `PPPoE ${sub.pppoe_username || '(none)'} → ${to} — ${why}`)]);
+      return {
+        status: 'done', subscriber: r[0], freed,
+        detail: `${sub.name}'s pin: PPPoE ${sub.pppoe_username || '(none)'} → ${to}` +
+          (freed ? `; ${freed.name}'s pin gave up ${to} (marked ${freed.status})` : ''),
+      };
+    });
+    if (out.error) return res.status(out.code).json({ ok: false, error: out.error });
+    console.log(`[pppoe-swap] ${out.status}: ${out.detail}`);
+    res.json({ ok: true, ...out });
+  } catch (e) {
+    if (e && e.code === '23505') return res.status(409).json({ ok: false, error: `${to} is on another pin that changed at the same moment — retry` });
     next(e);
   }
 });
