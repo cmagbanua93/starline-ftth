@@ -1228,6 +1228,25 @@ router.post('/installations', async (req, res, next) => {
       const blocked = await portBlocker(client, port, ticketId);
       if (blocked) return blocked;
 
+      /* A re-used modem (its former subscriber stopped paying and billing has already
+         given the account to the new one): the old pin gives the PPPoE up instead of
+         blocking the new installation. Only when the ticket says so — otherwise a
+         duplicate is still refused, because it is usually a typo. */
+      let freed = null;
+      const u = clean(s.pppoe_username);
+      if (u && b.releasePppoe) {
+        const holders = (await client.query(
+          'SELECT * FROM subscribers WHERE lower(pppoe_username) = lower($1) AND coalesce(installed_by_ticket, \'\') <> $2 FOR UPDATE', [u, ticketId])).rows;
+        for (const h of holders) {
+          const st = h.status === 'active' ? 'disconnected' : h.status;
+          const note = `PPPoE ${u} (modem) moved to ${clean(s.name)} — re-used modem, job ${ticketId} ${new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10)}`;
+          const r = await client.query(
+            'UPDATE subscribers SET pppoe_username = NULL, status = $2, notes = $3, updated_at = now() WHERE id = $1 RETURNING id, name, status',
+            [h.id, st, (h.notes ? h.notes + '\n' : '') + note]);
+          freed = r.rows[0];
+        }
+      }
+
       const ins = await client.query(
         `INSERT INTO subscribers
            (port_id, name, address, phone, pppoe_username, plan, onu_serial, status,
@@ -1240,7 +1259,7 @@ router.post('/installations', async (req, res, next) => {
       await client.query(
         `UPDATE ports SET status = 'used', reserved_for = NULL, reserved_at = NULL WHERE id = $1`,
         [portId]);
-      return { subscriber: ins.rows[0] };
+      return { subscriber: ins.rows[0], freed };
     });
 
     if (out.error) return res.status(out.code).json({ error: out.error });
